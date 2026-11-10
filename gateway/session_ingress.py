@@ -53,9 +53,11 @@ async def admit_message(authority, event):
             # Refused before commit (_validate_native): a refusal notice instead of a generic turn error.
             # The reply reaches the whole chat, so only content clauses are named; trust and provenance
             # clauses (and any new one) stay generic, and gateway.log keeps the clause (``_refuse``).
+            # On email/DM platforms the reply also leaves the instance entirely, so it names no
+            # operator and no log: the sender is an external correspondent, not the operator (#151644).
             named = f'{exc.reason}: {exc.field}' if exc.field in _CONTENT_CLAUSES else exc.reason
             return (f'⚠️ Hermes refused this message ({named}), so it was not saved '
-                    'or answered. Ask the operator to check gateway.log.')
+                    'or answered.')
         if exc.reason != 'queue_full':
             raise
         # Nothing was committed (main's busy-queue cap): say so instead of a generic turn error.

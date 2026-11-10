@@ -209,9 +209,21 @@ def _ask_for_call(server_name: str, tool_name: str, charge, booked: Optional[lis
                       f"'{server_name}'. The command was NOT run. Do not retry without explicit user direction.")
 
 
-def _check_circuit_breaker(server_name: str) -> Optional[str]:
+def _call_signature(tool_name: str, args: Optional[dict]) -> tuple:
+    """Stable identity for a call: tool name plus canonical (sorted) args JSON."""
+    return (tool_name, json.dumps(args or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+
+
+def _check_circuit_breaker(server_name: str, tool_name: Optional[str] = None,
+                           args: Optional[dict] = None) -> Optional[str]:
     """Open-breaker error, or None when calls may proceed. After the cooldown the breaker is
-    half-open: the next call probes; success resets, failure re-bumps and re-arms the cooldown."""
+    half-open: the next call probes; success resets, failure re-bumps and re-arms the cooldown.
+    While open on application errors only a call whose exact signature already failed in the
+    streak is rejected — a never-tried signature is its own probe, since the rejection text
+    tells the model to fix the arguments (#152506). Transport outages keep the blanket
+    rejection: nothing about a new signature says the transport is back. A rejection is a
+    harness refusal (the call never dispatched), so it carries ``guardrail_refusal`` and is
+    not counted as an executed failure by the guardrail controller."""
     from tools.mcp_tool_scope import _resolve_server_key
     key = _resolve_server_key(server_name)
     failures = _core._server_error_counts.get(key, 0)
@@ -220,14 +232,18 @@ def _check_circuit_breaker(server_name: str) -> Optional[str]:
         return None
     retry_in = max(1, int(_core._CIRCUIT_BREAKER_COOLDOWN_SEC - age))
     if _core._server_errors_all_application.get(key):
+        if tool_name is not None and _call_signature(tool_name, args) not in _core._breaker_failed_signatures(server_name):
+            return None
         # The server answered every time; the calls were rejected. Calling it "unreachable" sent the
         # model to the user instead of to its own arguments (#11113).
         return tool_error(f"MCP server '{server_name}' rejected the last {failures} calls (it is reachable; see the "
                           f"error text those calls returned). Paused for ~{retry_in}s. Do NOT repeat the same call — "
-                          f"fix the arguments/URL/target or use a different approach.")
+                          f"fix the arguments/URL/target or use a different approach.",
+                          guardrail_refusal=True)
     return tool_error(f"MCP server '{server_name}' is unreachable after {failures} consecutive failures. "
                       f"Auto-retry available in ~{retry_in}s. Do NOT retry "
-                      f"this tool yet — use alternative approaches or ask the user to check the MCP server.")
+                      f"this tool yet — use alternative approaches or ask the user to check the MCP server.",
+                      guardrail_refusal=True)
 
 
 def _acquire_call_server(server_name: str, tool_timeout: float):
@@ -271,11 +287,14 @@ def _result_is_error(result) -> bool:
         return False
 
 
-def _record_call_outcome(server_name: str, result) -> Any:
+def _record_call_outcome(server_name: str, result, signature: Optional[tuple] = None) -> Any:
     """Breaker bookkeeping: an error payload from the tool itself still counts as a strike (#10447),
-    flagged as an application error so the open-breaker message stays truthful."""
+    flagged as an application error so the open-breaker message stays truthful. *signature* records
+    which exact call failed, so the open breaker can still admit a never-tried signature (#152506)."""
     if _result_is_error(result):
         _core._bump_server_error(server_name, application=True)
+        if signature is not None:
+            _core._record_breaker_failed_signature(server_name, signature)
     else:
         _core._reset_server_error(server_name)
     return result
@@ -449,7 +468,8 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
 
 
 def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float, recoverers,
-              on_final_failure: Callable[[BaseException], None], record_outcome: bool = False) -> str:
+              on_final_failure: Callable[[BaseException], None], record_outcome: bool = False,
+              signature: Optional[tuple] = None) -> str:
     """Mark the call started on *server* (doubles may lack ``mark_tool_call``), run coroutine function *call*
     on the MCP loop and, on failure, walk ``recoverers`` (``(server_name, exc, retry_call, op) -> Optional[str]``,
     None = not its kind; order matters). Unrecovered exceptions go through ``on_final_failure`` and become the
@@ -462,7 +482,7 @@ def _dispatch(server_name: str, server: Any, op: str, call, tool_timeout: float,
 
     try:
         result = call_once()
-        return _record_call_outcome(server_name, result) if record_outcome else result
+        return _record_call_outcome(server_name, result, signature) if record_outcome else result
     except InterruptedError:
         return tool_error("MCP call interrupted: user sent a new message")
     except Exception as exc:
@@ -703,7 +723,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float, *,
         error = _trust_gate_check(server_name, tool_name, booked, args)
         if error is not None:
             return error
-        server, error = None, _check_circuit_breaker(server_name)
+        server, error = None, _check_circuit_breaker(server_name, tool_name, args)
         if error is None:
             server, error = _acquire_call_server(server_name, tool_timeout)
         if server is None:
@@ -742,7 +762,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float, *,
         text = _dispatch(
             server_name, server, op, _call, tool_timeout,
             (_handle_stdio_child_exited_and_retry, _handle_auth_error_and_retry, session_expired),
-            _on_failure, record_outcome=True)
+            _on_failure, record_outcome=True, signature=_call_signature(tool_name, args))
         # Off the MCP loop on purpose: image prep is CPU work (bounded vision pool) that must not stall other servers' I/O.
         return _mcp_result_with_native_images(text, image_paths) if native_images and not _result_is_error(text) else text
     return _handler

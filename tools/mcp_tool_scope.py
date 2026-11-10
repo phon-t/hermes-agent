@@ -68,7 +68,8 @@ _KEYED_LEDGERS = (
     "_servers", "_server_scope_keys", "_server_tool_scopes", "_server_connect_errors",
     "_lazy_server_configs", "_lazy_server_fingerprints", "_lazy_server_tool_names",
     "_server_connect_retry_after", "_server_connect_failures", "_server_error_counts",
-    "_server_breaker_opened_at", "_server_errors_all_application", "_server_trust_levels",
+    "_server_breaker_opened_at", "_server_errors_all_application", "_server_breaker_failed_signatures",
+    "_server_trust_levels",
     "_tool_read_only_hints", "_server_cost_policies")
 _KEYED_SETS = ("_server_connecting", "_parallel_safe_servers")
 

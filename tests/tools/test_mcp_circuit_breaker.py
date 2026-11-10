@@ -95,6 +95,10 @@ def _cleanup(mcp_tool_module, name: str) -> None:
     mcp_tool_module._server_error_counts.pop(name, None)
     if hasattr(mcp_tool_module, "_server_breaker_opened_at"):
         mcp_tool_module._server_breaker_opened_at.pop(name, None)
+    if hasattr(mcp_tool_module, "_server_errors_all_application"):
+        mcp_tool_module._server_errors_all_application.pop(name, None)
+    if hasattr(mcp_tool_module, "_server_breaker_failed_signatures"):
+        mcp_tool_module._server_breaker_failed_signatures.pop(name, None)
 
 
 # ---------------------------------------------------------------------------
@@ -608,3 +612,98 @@ def test_breaker_opened_by_tool_errors_says_rejected_not_unreachable(monkeypatch
     finally:
         _cleanup(mcp_tool, "srv")
         mcp_tool._server_errors_all_application.pop("srv", None)
+
+
+def test_open_application_breaker_admits_never_tried_signature(monkeypatch, tmp_path):
+    """Regression for #152506 (flaw 1): while the breaker is open on application errors, a call
+    with corrected arguments — a signature that never failed — is its own probe, while the
+    already-failing signature stays rejected."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from tools import mcp_tool
+    from tools.mcp_tool_handlers import _make_tool_handler
+
+    call_count = {"n": 0}
+
+    async def _call_tool(*a, **kw):
+        call_count["n"] += 1
+        result = MagicMock()
+        args = kw.get("arguments") or {}
+        if args.get("query") == "bad":
+            result.is_error = True
+            block = MagicMock()
+            block.text = "Google Ads API Error: Unrecognized field in the query"
+            result.content = [block]
+        else:
+            result.is_error = False
+            block = MagicMock()
+            block.text = "ok"
+            result.content = [block]
+        result.structured_content = None
+        return result
+
+    _install_stub_server(mcp_tool, "srv", _call_tool)
+    _mcp_loop._ensure_mcp_loop()
+    try:
+        handler = _make_tool_handler("srv", "query", 10.0)
+        for _ in range(mcp_tool._CIRCUIT_BREAKER_THRESHOLD):
+            assert "Unrecognized field" in json.loads(handler({"query": "bad"}))["error"]
+        assert call_count["n"] == mcp_tool._CIRCUIT_BREAKER_THRESHOLD
+
+        # Same failing signature: still rejected, never dispatched.
+        rejected = json.loads(handler({"query": "bad"}))
+        assert "rejected" in rejected["error"].lower(), rejected
+        assert rejected.get("guardrail_refusal") is True
+        assert call_count["n"] == mcp_tool._CIRCUIT_BREAKER_THRESHOLD
+
+        # Corrected arguments, never tried: admitted as its own probe and succeeds.
+        parsed = json.loads(handler({"query": "good"}))
+        assert parsed.get("result") == "ok", parsed
+        assert call_count["n"] == mcp_tool._CIRCUIT_BREAKER_THRESHOLD + 1
+        # Success closes the breaker.
+        assert mcp_tool._server_error_counts.get("srv", 0) == 0
+    finally:
+        _cleanup(mcp_tool, "srv")
+
+
+def test_breaker_rejection_is_not_counted_as_executed_failure(monkeypatch, tmp_path):
+    """Regression for #152506 (flaw 2): a breaker rejection carries ``guardrail_refusal``, so
+    neither the display classifier nor the guardrail controller counts it as an executed
+    failure — a rejected batch of 10 cannot trip ``same_tool_failure_halt``."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    from agent.display import _detect_tool_failure
+    from agent.tool_guardrails import ToolCallGuardrailController, classify_tool_failure
+    from agent.tool_result_classification import is_guardrail_refusal
+    from tools import mcp_tool
+    from tools.mcp_tool_handlers import _make_tool_handler
+
+    async def _call_tool_rejects(*a, **kw):
+        result = MagicMock()
+        result.is_error = True
+        block = MagicMock()
+        block.text = "Google Ads API Error: Unrecognized field in the query"
+        result.content = [block]
+        result.structured_content = None
+        return result
+
+    _install_stub_server(mcp_tool, "srv", _call_tool_rejects)
+    _mcp_loop._ensure_mcp_loop()
+    try:
+        handler = _make_tool_handler("srv", "query", 10.0)
+        for _ in range(mcp_tool._CIRCUIT_BREAKER_THRESHOLD):
+            handler({"query": "bad"})
+        rejected = handler({"query": "bad"})
+        assert is_guardrail_refusal(rejected) is True
+        assert classify_tool_failure("mcp__srv__query", rejected) == (False, "")
+        assert _detect_tool_failure("mcp__srv__query", rejected) == (False, "")
+
+        controller = ToolCallGuardrailController()
+        for i in range(10):
+            decision = controller.after_call(
+                "mcp__srv__query", {"query": f"bad-{i}"}, rejected)
+            assert decision.action != "halt", decision
+            assert decision.code != "same_tool_failure_halt", decision
+        assert controller._same_tool_failure_counts.get("mcp__srv__query", 0) == 0
+    finally:
+        _cleanup(mcp_tool, "srv")

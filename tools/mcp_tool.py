@@ -513,6 +513,10 @@ _server_breaker_opened_at: dict[Any, float] = {}
 # True while every strike in the current streak was the tool's own error payload (server reachable,
 # call rejected); picks the open-breaker wording, since "unreachable" was false for that case (#11113).
 _server_errors_all_application: dict[Any, bool] = {}
+# Call signatures (tool name, canonical args) whose executed calls failed in the current streak,
+# keyed by connection key. While the breaker is open on application errors only a signature in
+# this set is rejected; a never-tried signature is its own probe (#152506).
+_server_breaker_failed_signatures: dict[Any, set] = {}
 _CIRCUIT_BREAKER_THRESHOLD, _CIRCUIT_BREAKER_COOLDOWN_SEC = 3, 60.0
 
 # Trust-tier gating (``trust: full | untrusted``): on an untrusted server every write-capable
@@ -552,6 +556,19 @@ def _reset_server_error(server_name: str) -> None:
     _server_error_counts[key] = 0
     _server_breaker_opened_at.pop(key, None)
     _server_errors_all_application.pop(key, None)
+    _server_breaker_failed_signatures.pop(key, None)
+
+
+def _record_breaker_failed_signature(server_name: str, signature: tuple) -> None:
+    """Remember that *signature* (tool name, canonical args) failed in the current streak."""
+    from tools.mcp_tool_scope import _resolve_server_key
+    _server_breaker_failed_signatures.setdefault(_resolve_server_key(server_name), set()).add(signature)
+
+
+def _breaker_failed_signatures(server_name: str) -> frozenset:
+    """Signatures that failed in the current streak (empty when the breaker never opened)."""
+    from tools.mcp_tool_scope import _resolve_server_key
+    return frozenset(_server_breaker_failed_signatures.get(_resolve_server_key(server_name), ()))
 
 
 # Servers opted into parallel tool calls, keyed by the consuming profile's own key (``foo-bar``/

@@ -248,6 +248,36 @@ class TestGatewayLifecyclePattern:
     def test_boundary_fix_still_blocks_real_commands(self, text):
         assert _contains_gateway_lifecycle_command(text), f"Should match: {text!r}"
 
+    @pytest.mark.parametrize("text", [
+        # #152712: the module spelling is the form the product itself uses
+        # to start the gateway, so it is the same command as `hermes gateway ...`.
+        "python -m hermes_cli.main gateway restart",
+        "python -m hermes_cli.main gateway stop",
+        "python -m hermes_cli.main gateway uninstall",
+        "python3.12 -m hermes_cli.main gateway restart",
+        "python.exe -m hermes_cli.main gateway restart",
+        "/usr/bin/python -m hermes_cli.main gateway restart",
+        # Interpreter flags between `python` and `-m` must not hide the shape.
+        "python -I -m hermes_cli.main gateway stop",
+        "true;python -m hermes_cli.main gateway restart",
+        'echo $(python -m hermes_cli.main gateway stop)',
+        'subprocess.run(["python", "-m", "hermes_cli.main", "gateway", "restart"])',
+    ])
+    def test_python_module_form_blocked(self, text):
+        assert _contains_gateway_lifecycle_command(text), f"Should match: {text!r}"
+
+    @pytest.mark.parametrize("text", [
+        # Same exclusions as the bare form: `start`/`run` are benign, and a
+        # word tail (`xpython`) is not the interpreter.
+        "python -m hermes_cli.main gateway start",
+        "python -m hermes_cli.main gateway run",
+        "python -m hermes_cli.main gateway status",
+        "xpython -m hermes_cli.main gateway restart",
+        "python -m hermes_cli.main",
+    ])
+    def test_python_module_form_allowed(self, text):
+        assert not _contains_gateway_lifecycle_command(text), f"Should NOT match: {text!r}"
+
     def test_quoted_multiline_payload_tokenizes_as_one_logical_line(self):
         # #92372: a newline inside a quoted string is data, not a command
         # separator. A quoted data-file path on its own physical line inside
@@ -333,6 +363,12 @@ class TestProfileFlagGatewayLifecycle:
         # Shell quoting of the profile id is equivalent to the bare name.
         "hermes -p 'zeus' gateway restart",
         "hermes --profile \"zeus\" gateway stop",
+        # #152712: module spelling, profile flag after the module name.
+        "python -m hermes_cli.main -p zeus gateway stop",
+        "python -m hermes_cli.main -p zeus gateway restart",
+        "python -m hermes_cli.main --profile zeus gateway restart",
+        "python -m hermes_cli.main --profile=zeus gateway stop",
+        "python3.12 -m hermes_cli.main -p zeus gateway restart",
     ])
     def test_self_target_blocked(self, text):
         assert _contains_gateway_lifecycle_command(text), f"Should block: {text!r}"
@@ -343,6 +379,10 @@ class TestProfileFlagGatewayLifecycle:
         "hermes --profile venus gateway restart",
         "hermes --profile=venus gateway stop",
         "hermes -p venus -v gateway restart",
+        # #152712: module spelling, sibling profile stays a legitimate fleet operation.
+        "python -m hermes_cli.main -p venus gateway stop",
+        "python -m hermes_cli.main -p venus gateway restart",
+        "python -m hermes_cli.main --profile=venus gateway stop",
     ])
     def test_sibling_allowed(self, text):
         assert not _contains_gateway_lifecycle_command(text), f"Should allow: {text!r}"

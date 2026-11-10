@@ -37,7 +37,12 @@ _GATEWAY_LIFECYCLE_PATTERN = re.compile(
     # See #77173.
     # Windows spells the CLI with a launcher suffix (`hermes.exe`, npm-style `hermes.cmd`/`.ps1`);
     # same command, so the suffix is optional here.
-    r"(?:(?<![/\w.\-])hermes(?:\.(?:exe|cmd|bat|com|ps1))?\s+gateway\s+(?:restart|stop|uninstall)\b)"
+    # The module spelling (`python -m hermes_cli.main gateway ...`) is the same command — it is
+    # the form the product itself uses to start the gateway — so it is an alternative command
+    # token here, with optional interpreter flags between `python` and `-m` (`python -I -m ...`).
+    # Its lookbehind omits `/` on purpose: a full interpreter path (`/usr/bin/python -m ...`) IS
+    # a real command position, unlike `hermes` as a path component. See #152712.
+    r"(?:(?:(?<![\w.\-])python[\d.]*(?:\.exe)?\s+(?:-\S+\s+)*-m\s+hermes_cli\.main|(?<![/\w.\-])hermes(?:\.(?:exe|cmd|bat|com|ps1))?)\s+gateway\s+(?:restart|stop|uninstall)\b)"
     # Branch B: launchctl ops anchored on a hermes-gateway label so unrelated hermes services stay
     # unblocked. `submit`/`bootstrap` register a NEW keepalive job wrapping an arbitrary helper (a
     # laundered restart); neutral-label submissions are caught by
@@ -242,9 +247,12 @@ _ARGV_LIST_PUNCTUATION = re.compile(r"[\[\],]+")
 # `hermes -p venus gateway restart` operates on a sibling profile's gateway and is a legitimate fleet
 # operation. The pattern captures the named profile so `contains_gateway_lifecycle_command` can block only
 # the self-targeting shape (named profile == the profile running the guard). See #78028.
+# The module spelling (`python -m hermes_cli.main -p <profile> gateway ...`) is the same command
+# with the profile flag after the module name, so it is an alternative command token here. See #152712.
 _PROFILE_FLAG_LIFECYCLE_PATTERN = re.compile(
     r"(?i)"
-    r"hermes\s+"
+    r"(?:python[\d.]*(?:\.exe)?\s+(?:-\S+\s+)*-m\s+hermes_cli\.main|hermes)"
+    r"\s+"
     # Each flag has one parse: '-' plus its remainder, never two ways to split
     # '--'. A following flag cannot also be an optional value (#129281).
     # Possessive token/space runs avoid repartitioning whitespace on failure;

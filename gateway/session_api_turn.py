@@ -502,7 +502,10 @@ def wire_api_observers(agent, owner, want_interim):
     progress = agent.tool_progress_callback
 
     def tool_progress_callback(event_type, *args, **kwargs):
-        if event_type in ('tool.started', 'tool.completed'):
+        # ``tool.progress`` rides the same observer sink as ``tool.started``/``tool.completed``,
+        # verbatim (``total``/``percent`` only when the server reported them); ``tool.completed``
+        # is the clear signal that lets a client drop the progress state (#152515).
+        if event_type in ('tool.started', 'tool.progress', 'tool.completed'):
             publish_api_tool_progress(authority, session_id, generation, event_type, *args, **kwargs)
         if progress is not None:
             return progress(event_type, *args, **kwargs)

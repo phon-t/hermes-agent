@@ -227,6 +227,7 @@ gateway:
     wake:
       completed: "completed"
       gave_up: "gave up (retries exhausted)"
+      gave_up_terminal: "gave up: not retryable"
       crashed: "crashed (worker exited); dispatcher will retry"
       timed_out: "timed out; dispatcher will retry"
       blocked: "blocked; needs attention"
@@ -238,6 +239,7 @@ gateway:
       message: "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."
       handoff: "Result: {summary}"
       review_detail: "Review feedback: {reason}\nInspect the existing card and its current review run; return work to the same implementation task. Do not treat this BLOCK as approval and do not create a duplicate task."
+      gave_up_detail: "Cause: {reason}\nFix the cause, then `hermes kanban unblock {task_id}` (or `hermes kanban reassign {task_id}`)."
       guidance: "This is an automatic task-status notification, not a request to decompose the task again. Inspect the current board before creating follow-up tasks; do not recreate tasks or graphs that already exist."
     ping:
       completed: "✔ {head} виконано — {title}{handoff}"

@@ -230,6 +230,7 @@ gateway:
     wake:
       completed: "befejeződött"
       gave_up: "feladva (az újrapróbálkozások elfogytak)"
+      gave_up_terminal: "gave up: not retryable"
       crashed: "összeomlott (a worker kilépett); a diszpécser újrapróbálja"
       timed_out: "időtúllépés; a diszpécser újrapróbálja"
       blocked: "blokkolva; figyelmet igényel"
@@ -241,6 +242,7 @@ gateway:
       message: "[kanban] A(z) {task_id} feladat {status}.\nCím: {title}\nFelelős: @{assignee}\nTábla: {board}\n\nNézd meg az eredményt, vagy dönts a következő lépésről."
       handoff: "Eredmény: {summary}"
       review_detail: "Átnézési visszajelzés: {reason}\nNézd meg a meglévő kártyát és az aktuális átnézési futást; a munkát ugyanahhoz a megvalósítási feladathoz add vissza. Ezt a BLOCK-ot ne tekintsd jóváhagyásnak, és ne hozz létre duplikált feladatot."
+      gave_up_detail: "Cause: {reason}\nFix the cause, then `hermes kanban unblock {task_id}` (or `hermes kanban reassign {task_id}`)."
       guidance: "Ez egy automatikus feladatállapot-értesítés, nem kérés a feladat újbóli felbontására. Nézd meg az aktuális táblát, mielőtt követő feladatokat hoznál létre; ne hozz létre újra már létező feladatokat vagy gráfokat."
     ping:
       completed: "✔ {head} kész — {title}{handoff}"

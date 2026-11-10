@@ -227,6 +227,7 @@ gateway:
     wake:
       completed: "اكتملت"
       gave_up: "استسلم (نفدت المحاولات)"
+      gave_up_terminal: "gave up: not retryable"
       crashed: "تعطّل (خرج العامل)؛ سيعيد المُوزّع المحاولة"
       timed_out: "انتهت المهلة؛ سيعيد المُوزّع المحاولة"
       blocked: "محجوبة؛ تحتاج إلى انتباه"
@@ -238,6 +239,7 @@ gateway:
       message: "[kanban] المهمة {task_id} {status}.\nالعنوان: {title}\nالمُكلَّف: @{assignee}\nاللوحة: {board}\n\nراجع النتيجة أو قرّر الخطوة التالية."
       handoff: "Result: {summary}"
       review_detail: "ملاحظات المراجعة: {reason}\nافحص البطاقة الحالية وتشغيل المراجعة الجاري؛ أعد العمل إلى مهمة التنفيذ نفسها. لا تعتبر هذا الحجب موافقة ولا تنشئ مهمة مكررة."
+      gave_up_detail: "Cause: {reason}\nFix the cause, then `hermes kanban unblock {task_id}` (or `hermes kanban reassign {task_id}`)."
       guidance: "This is an automatic task-status notification, not a request to decompose the task again. Inspect the current board before creating follow-up tasks; do not recreate tasks or graphs that already exist."
     ping:
       completed: "✔ {head} تمّت — {title}{handoff}"

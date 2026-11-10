@@ -456,7 +456,12 @@ def _fmt_gave_up(ev, n) -> tuple:
     count = (t("gateway.kanban.ping.failed_n_times", count=int(failures)) if failures
              else t("gateway.kanban.ping.kept_failing"))
     last = _clip(ev, "error", "gateway.kanban.ping.last_error", 160)
-    return t("gateway.kanban.ping.gave_up", head=n.head, count=count, last=last, task_id=n.task_id), None, None
+    # The wake gets the same reason the ping already carries: first line only, redacted
+    # and bounded like the review detail, so the woken creator knows what to fix (#151608).
+    error = _payload(ev, "error")
+    detail = _safe_review_reason(_first_line(str(error), 200)) if error else None
+    return (t("gateway.kanban.ping.gave_up", head=n.head, count=count, last=last, task_id=n.task_id),
+            None, detail or None)
 
 
 def _fmt_timed_out(ev, n) -> tuple:
@@ -519,7 +524,7 @@ class _KanbanNotification:
         self.send_passive = mode != "wake"
         # Worker handoff carried into the synthetic wake turn so the woken
         # creator doesn't re-decompose work already on the board.
-        self.wake_handoff = self.wake_review_detail = self.session_key = self.synth = ""
+        self.wake_handoff = self.wake_review_detail = self.wake_gave_up_detail = self.session_key = self.synth = ""
         self.plat: Any = None
         self.adapter: Any = None
         self.is_push_adapter = True
@@ -568,8 +573,24 @@ class _KanbanNotification:
         if handoff is not None:
             self.wake_handoff = handoff
         if review_detail is not None:
-            self.wake_review_detail = review_detail
+            # The third slot is "wake detail" generically; a gave_up's cause renders
+            # under its own template (with the unblock hint), not the review one.
+            if ev.kind == "gave_up":
+                self.wake_gave_up_detail = review_detail
+            else:
+                self.wake_review_detail = review_detail
         return msg
+
+    def _wake_label(self, kind: str) -> str:
+        """Wake status label for ``kind``. A gave_up that tripped early — terminal
+        provider or sticky force_trip — did not exhaust its retries, so it gets its
+        own label instead of "retries exhausted" (#151608)."""
+        if kind == "gave_up" and any(
+            _payload(ev, "terminal_provider") or _payload(ev, "sticky")
+            for ev in self.d["events"] if ev.kind == "gave_up"
+        ):
+            return t("gateway.kanban.wake.gave_up_terminal")
+        return t(f"gateway.kanban.wake.{kind}")
 
     def build_wake_text(self) -> None:
         """Set ``wake_kinds`` / ``session_key`` / ``synth`` for the wake paths."""
@@ -586,7 +607,7 @@ class _KanbanNotification:
             # for child tasks; use it only for legacy rows.
             self.session_key = sub["chat_id"] or getattr(task, "session_id", None) or ""
         # i18n keys: gateway.kanban.wake.<kind> for each _WAKE_KINDS entry.
-        _parts = [t(f"gateway.kanban.wake.{k}") for k in _WAKE_KINDS if k in self.wake_kinds]
+        _parts = [self._wake_label(k) for k in _WAKE_KINDS if k in self.wake_kinds]
         _status = t("gateway.kanban.wake.status_joiner").join(_parts) or t("gateway.kanban.wake.status_default")
         synth = t(
             "gateway.kanban.wake.message",
@@ -599,6 +620,9 @@ class _KanbanNotification:
             synth += "\n" + t("gateway.kanban.wake.handoff", summary=self.wake_handoff)
         if self.wake_review_detail:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
+        if self.wake_gave_up_detail:
+            synth += "\n" + t("gateway.kanban.wake.gave_up_detail",
+                             reason=self.wake_gave_up_detail, task_id=self.task_id)
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
 
     def _log_woke(self) -> None:

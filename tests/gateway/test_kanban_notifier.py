@@ -796,3 +796,90 @@ def test_review_requested_does_not_wake_a_notify_only_subscription(
     assert adapter.handled == [], (
         "notify-only subscriptions must not be woken by a review handoff"
     )
+
+
+def _gave_up_task(*, error, failures=1, effective_limit=2, terminal=False):
+    """A task with a notify+wake sub and one appended gave_up event."""
+    conn = kbc.connect()
+    try:
+        tid = kb.create_task(
+            conn,
+            title="do the thing",
+            assignee="worker",
+            session_id="agent:main:telegram:dm:chat-1",
+        )
+        kbn.add_notify_sub(
+            conn,
+            task_id=tid,
+            platform="telegram",
+            chat_id="chat-1",
+            chat_type="dm",
+            delivery_mode="notify+wake",
+        )
+        payload = {
+            "failures": failures,
+            "effective_limit": effective_limit,
+            "limit_source": "dispatcher",
+            "error": error,
+            "trigger_outcome": "crashed",
+            "retry_status": "ready",
+        }
+        if terminal:
+            payload.update({"sticky": True, "terminal_provider": True})
+        kb._append_event(conn, tid, "gave_up", payload)
+        return tid
+    finally:
+        conn.close()
+
+
+def test_gave_up_terminal_wake_names_the_cause_not_retries(tmp_path, monkeypatch):
+    """#151608: a worker that exited because the provider rejected the profile's
+    credential trips gave_up after 1 of 2 attempts. The wake must not claim
+    "retries exhausted", and must carry the reason plus the unblock hint — the
+    push ping already has both, the woken agent gets less without them."""
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "gave-up-terminal.db"))
+    kb.init_db()
+    tid = _gave_up_task(
+        error="the provider rejected this profile's credential or model — fix the configuration, then unblock.",
+        failures=1,
+        effective_limit=2,
+        terminal=True,
+    )
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1, "the passive gave_up ping is unchanged"
+    ping = adapter.sent[0]["text"]
+    assert "provider rejected this profile's credential" in ping
+    assert f"hermes kanban unblock {tid}" in ping
+
+    wake = _wake_text(adapter)
+    assert "gave up: not retryable" in wake
+    assert "retries exhausted" not in wake
+    assert "provider rejected this profile's credential" in wake
+    assert f"hermes kanban unblock {tid}" in wake
+
+
+def test_gave_up_retries_exhausted_wake_carries_first_line_only(tmp_path, monkeypatch):
+    """#151608: a genuinely exhausted budget keeps the "retries exhausted" label,
+    but the wake still carries the (first-line, bounded) reason and the unblock hint."""
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(tmp_path / "gave-up-exhausted.db"))
+    kb.init_db()
+    tid = _gave_up_task(
+        error="worker crashed: exit 1\ntraceback line 2 must not ride the wake",
+        failures=2,
+        effective_limit=2,
+    )
+
+    adapter = RecordingAdapter()
+    runner = _make_runner(adapter)
+    asyncio.run(_run_one_notifier_tick(monkeypatch, runner))
+
+    assert len(adapter.sent) == 1
+    wake = _wake_text(adapter)
+    assert "gave up (retries exhausted)" in wake
+    assert "worker crashed: exit 1" in wake
+    assert "traceback line 2" not in wake
+    assert f"hermes kanban unblock {tid}" in wake

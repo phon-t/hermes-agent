@@ -289,3 +289,44 @@ def test_curated_openrouter_row_keeps_free_tail_past_max_models(monkeypatch):
 
     assert rows["openrouter"]["models"] == [mid for mid, _ in curated]
     assert len(rows["deepseek"]["models"]) == 50
+
+def _picker_with_staged_local_models(monkeypatch, staged, current_provider="nous"):
+    """``list_picker_providers`` with one built-in row and the given staged GGUFs."""
+    monkeypatch.setattr(model_switch, "list_authenticated_providers",
+                        lambda **_: [_make_provider("nous", models=["moonshotai/kimi-k3"])])
+    monkeypatch.setattr(hermes_cli_model_switch_providers, "list_authenticated_providers",
+                        lambda **_: [_make_provider("nous", models=["moonshotai/kimi-k3"])])
+    monkeypatch.setattr("hermes_cli.models.fetch_openrouter_models", lambda *a, **kw: [])
+    monkeypatch.setattr("hermes_cli.local_runtime.bootstrap.staged_model_ids",
+                        lambda: list(staged))
+    return model_switch_providers.list_picker_providers(
+        current_provider=current_provider, max_models=50)
+
+
+def test_picker_includes_staged_local_runtime_row(monkeypatch):
+    """The chat ``/model`` picker must list managed local llamacpp models (#152473): the same
+    ``llamacpp`` row ``build_models_payload`` injects for the desktop/CLI picker."""
+    rows = _picker_with_staged_local_models(monkeypatch, ["qwen3-1.7b", "llama-3.2-1b"])
+
+    local = next((r for r in rows if r.get("slug") == "llamacpp"), None)
+    assert local is not None
+    assert local["models"] == ["qwen3-1.7b", "llama-3.2-1b"]
+    assert local["name"] == "Local"
+    assert local["is_current"] is False
+
+
+def test_picker_local_runtime_row_marks_current_provider(monkeypatch):
+    """A session running on the managed local server shows the Local row as current."""
+    rows = _picker_with_staged_local_models(
+        monkeypatch, ["qwen3-1.7b"], current_provider="llamacpp")
+
+    local = next((r for r in rows if r.get("slug") == "llamacpp"), None)
+    assert local is not None
+    assert local["is_current"] is True
+
+
+def test_picker_omits_local_runtime_row_when_nothing_staged(monkeypatch):
+    """No staged GGUFs means no Local row — the picker is unchanged for non-local users."""
+    rows = _picker_with_staged_local_models(monkeypatch, [])
+
+    assert not [r for r in rows if r.get("slug") == "llamacpp"]

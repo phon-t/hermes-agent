@@ -1404,11 +1404,28 @@ def list_picker_providers(
         is_custom_endpoint = bool(p.get("is_user_defined")) and bool(p.get("api_url"))
         if p.get("models") or is_custom_endpoint:
             filtered.append(p)
+    local_row = _local_runtime_picker_row(current_provider, current_base_url, current_model)
+    if local_row is not None:
+        filtered = [p for p in filtered if str(p.get("slug", "")).lower() != "llamacpp"] + [local_row]
     from hermes_cli.models_validate import drop_unofferable_model_ids
 
     drop_unofferable_model_ids(filtered)
     _attach_window_model_notes(filtered)
     return filtered
+
+
+def _local_runtime_picker_row(current_provider: str, current_base_url: str, current_model: str) -> dict | None:
+    """The managed-local-runtime ``llamacpp`` row for interactive pickers, built the same way
+    ``hermes_cli.inventory.build_models_payload`` builds it: staged GGUFs are selectable like any
+    provider's models, but ``list_authenticated_providers`` can't know about them (no credential —
+    reachability is the credential). ``None`` when nothing is staged (#152473)."""
+    try:
+        from hermes_cli.inventory import ConfigContext, _local_runtime_row
+        return _local_runtime_row(ConfigContext(
+            current_provider=current_provider, current_model=current_model,
+            current_base_url=current_base_url, user_providers={}, custom_providers=[]))
+    except Exception:
+        return None
 
 
 def _attach_window_model_notes(providers: list[dict]) -> None:

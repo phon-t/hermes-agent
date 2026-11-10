@@ -41,6 +41,27 @@ def _patched(func):
 # opencode-go: curated catalog in _PROVIDER_MODELS
 # ---------------------------------------------------------------------------
 
+# Models the provider retired (410 ModelDeprecated / "Model is unavailable",
+# #152882). The picker merges the static row over the live probe, so any id
+# left here keeps being offered after the provider removed it — and a
+# persisted pick then breaks every session until the config is edited by hand.
+_RETIRED_OPENCODE_GO_MODELS = frozenset({
+    "deepseek-v4-flash", "glm-5", "glm-5.1", "grok-4.5", "hy3-preview",
+    "kimi-k2.5", "kimi-k2.6", "mimo-v2-omni", "mimo-v2-pro", "mimo-v2.5",
+    "mimo-v2.5-pro", "minimax-m2.5", "minimax-m2.7", "qwen3.5-plus",
+    "qwen3.6-plus", "qwen3.7-max",
+})
+
+
+def test_opencode_go_static_row_offers_no_retired_models():
+    """The static row must not offer models the provider retired (#152882)."""
+    from hermes_cli.models import _PROVIDER_MODELS
+
+    offered = _PROVIDER_MODELS["opencode-go"]
+    assert offered, "static opencode-go row must not be empty"
+    assert not (set(offered) & _RETIRED_OPENCODE_GO_MODELS)
+    assert "kimi-k3" in offered  # live-verified model still offered
+
 
 @_patched
 def test_opencode_go_known_model_accepted():

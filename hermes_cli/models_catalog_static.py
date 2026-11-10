@@ -302,13 +302,14 @@ _PROVIDER_MODELS: dict[str, list[str]] = _CuratedCatalog({
     ],
     # Synced against opencode.ai/docs/go + live GET /zen/go/v1/models. Known-delisted models are
     # REMOVED (the live-first merge would otherwise keep offering a model that 401s): "ox-alpha-free"
-    # — the Go-subscription twin of Zen's Ox Alpha — was delisted 2026-09-09.
+    # — the Go-subscription twin of Zen's Ox Alpha — was delisted 2026-09-09. Retired 2026-11
+    # (410 ModelDeprecated / "Model is unavailable", #152882): deepseek-v4-flash, glm-5, glm-5.1,
+    # grok-4.5, hy3-preview, kimi-k2.5, kimi-k2.6, mimo-v2-omni, mimo-v2-pro, mimo-v2.5,
+    # mimo-v2.5-pro, minimax-m2.5, minimax-m2.7, qwen3.5-plus, qwen3.6-plus, qwen3.7-max.
     "opencode-go": [
-        "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "kimi-k2.5", "gpt-5.6-luna", "grok-4.5", "glm-5.3",
-        "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2-pro",
-        "mimo-v2-omni", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "deepseek-v4-pro",
-        "deepseek-v4-flash", "qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus",
-        "qwen3.5-plus", "hy3", "hy3-preview", "muse-spark-1.2-contributor", "muse-spark-1.3-contributor",
+        "kimi-k3", "kimi-k2.7-code", "gpt-5.6-luna", "glm-5.3",
+        "glm-5.3-flash", "glm-5.2", "minimax-m3", "deepseek-v4-pro",
+        "qwen3.8-max", "qwen3.7-plus", "hy3", "muse-spark-1.2-contributor", "muse-spark-1.3-contributor",
     ],
     "kilocode": [
         "anthropic/claude-opus-4.6", "anthropic/claude-sonnet-4.6", "openai/gpt-5.4",

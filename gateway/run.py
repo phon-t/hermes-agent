@@ -5190,4 +5190,7 @@ def _exit_after_graceful_shutdown(exit_code: int) -> None:
 
 
 if __name__ == "__main__":
+    # `python -m`: a later `import gateway.run` reuses THIS module; a second copy would split
+    # module globals (e.g. `_gateway_runner_ref`) between `__main__` and `gateway.run`.
+    sys.modules.setdefault("gateway.run", sys.modules["__main__"])
     main()

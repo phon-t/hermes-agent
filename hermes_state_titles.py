@@ -14,14 +14,16 @@ from hermes_state_common import (
 )
 
 
-def bot_chat_title_released(archived: Any, auto_archived: Any, tip_end_reason: Optional[str]) -> bool:
+def bot_chat_title_released(archived: Any, tip_end_reason: Optional[str]) -> bool:
     """The ONE predicate for "this archived row titled "Bot Chat" no longer holds the name"
-    (#139779): deliberately archived, i.e. not by the idle sweep (``auto_archived``, which
-    re-activation undoes) and without a recoverable reaper stamp on the lineage tip (#92687
-    resurrects those). Hidden or visible alike: a Bot Chat the delivery door minted is visible.
-    The title lookup skips exactly the rows the title-conflict check frees, so a lookup that says
-    "absent" never meets a name it cannot take."""
-    return bool(archived) and not auto_archived and (tip_end_reason or "") not in _RECOVERABLE_END_REASONS
+    (#139779, #151627): archived, without a recoverable reaper stamp on the lineage tip
+    (#92687 resurrects those). Deliberate archives and idle-sweep archives alike release the
+    name: the sweep archives a visible delivery-minted Bot Chat once it goes idle (only the
+    hidden canonical is exempt), and a swept row would otherwise keep its canonical identity
+    forever, absorbing cron bot-chat deliveries into an invisible chat while the
+    create-if-missing self-heal never fires. The title lookup skips exactly the rows the
+    title-conflict check frees, so a lookup that says "absent" never meets a name it cannot take."""
+    return bool(archived) and (tip_end_reason or "") not in _RECOVERABLE_END_REASONS
 
 # caplog tests pin the "hermes_state" logger name.
 logger = logging.getLogger("hermes_state")
@@ -147,7 +149,7 @@ class SessionTitlesMixin:
         rule lives, shared by renames and the API server's create-with-title. Returns the id
         whose title was cleared (an affected row for mutation receipts), else None."""
         conflict = conn.execute(
-            f"SELECT id, archived, auto_archived, hidden, {self._EMPTY_SESSION_WHERE} AS ghost "
+            f"SELECT id, archived, hidden, {self._EMPTY_SESSION_WHERE} AS ghost "
             "FROM sessions WHERE title = ? AND id != ?", (title, session_id),
         ).fetchone()
         if not conflict:
@@ -158,7 +160,7 @@ class SessionTitlesMixin:
         if self._is_compression_ancestor(conn, ancestor_id=conflict_id, descendant_id=session_id):
             conn.execute("UPDATE sessions SET title = NULL WHERE id = ?", (conflict_id,))
             return conflict_id
-        # A deliberately archived Bot Chat is a retired registry entry, not a live identity
+        # An archived Bot Chat is a retired registry entry, not a live identity
         # (same predicate the title lookup skips). Retire its name in the same title
         # transaction so a replacement can become the sole canonical row; the old session
         # remains archived and otherwise untouched.
@@ -167,7 +169,7 @@ class SessionTitlesMixin:
         # The full index stays: a ``message_count > 0`` partial index would make
         # the ghost's first append_message fail with IntegrityError.
         retired = title == self.CANONICAL_BOT_CHAT_TITLE and bot_chat_title_released(
-            conflict["archived"], conflict["auto_archived"], conn.execute(
+            conflict["archived"], conn.execute(
                 "SELECT end_reason FROM sessions WHERE id = ?",
                 (self._compression_tip_on(conn, conflict_id),)).fetchone()[0])
         if retired or (conflict["ghost"] and not conflict["hidden"]):
@@ -244,10 +246,12 @@ class SessionTitlesMixin:
     def get_session_by_title(self, title: str) -> Optional[dict[str, Any]]:
         """Look up a session by exact title. Returns session dict or None.
 
-        A deliberately archived canonical "Bot Chat" (:func:`bot_chat_title_released`, judged on
+        An archived canonical "Bot Chat" (:func:`bot_chat_title_released`, judged on
         the compression tip like ``unarchive_recoverable_session``) is a retired name: skipped, so
-        Bot Mode mints a fresh one (#139779). Recoverable auto-archives stay visible for #92687
-        resurrection. Every other title keeps returning its archived row (``-c``, ``/resume``).
+        Bot Mode mints a fresh one (#139779) and cron bot-chat delivery stops targeting the
+        archived row (#151627). Only an archived row whose tip carries a recoverable reaper
+        stamp stays resolvable, for #92687 resurrection. Every other title keeps returning its
+        archived row (``-c``, ``/resume``).
         """
         row = self._read_one(
             "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
@@ -260,7 +264,7 @@ class SessionTitlesMixin:
             return session
         tip_id = self.get_compression_tip(session["id"]) or session["id"]
         tip = (self.get_session(tip_id) or session) if tip_id != session["id"] else session
-        released = bot_chat_title_released(session["archived"], session.get("auto_archived"), tip.get("end_reason"))
+        released = bot_chat_title_released(session["archived"], tip.get("end_reason"))
         return None if released else session
 
     def resolve_session_by_title(self, title: str) -> Optional[str]:

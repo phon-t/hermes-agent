@@ -110,3 +110,42 @@ def test_bulk_archive_spares_compressed_bot_chat_with_visible_tip(tmp_path):
         assert db.get_session_by_title(SessionDB.CANONICAL_BOT_CHAT_TITLE)['id'] == 'tip'
     finally:
         db.close()
+
+
+def test_sweep_archived_visible_bot_chat_releases_canonical_title(tmp_path):
+    """#151627: a visible Bot Chat (minted by a delivery, so the idle sweep — which exempts
+    only the hidden canonical — archives it once idle) keeps its title in the row, but must
+    stop resolving as the canonical chat. Otherwise cron bot-chat delivery keeps targeting
+    the archived (invisible) row and the create-if-missing self-heal never fires."""
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    try:
+        db.create_session('canon', source='desktop')
+        assert db.set_session_title('canon', SessionDB.CANONICAL_BOT_CHAT_TITLE)
+        db._auto_archive_lineage('canon')
+        row = db.get_session('canon')
+        assert row['archived'] and row['title'] == SessionDB.CANONICAL_BOT_CHAT_TITLE
+        assert db.get_session_by_title(SessionDB.CANONICAL_BOT_CHAT_TITLE) is None
+        assert db.resolve_session_by_title(SessionDB.CANONICAL_BOT_CHAT_TITLE) is None
+        # The next delivery mints a fresh "Bot Chat" and takes the freed name.
+        db.create_session('fresh', source='desktop')
+        assert db.set_session_title('fresh', SessionDB.CANONICAL_BOT_CHAT_TITLE)
+        assert db.get_session_by_title(SessionDB.CANONICAL_BOT_CHAT_TITLE)['id'] == 'fresh'
+    finally:
+        db.close()
+
+
+def test_sweep_archived_bot_chat_with_recoverable_stamp_still_resurrects(tmp_path):
+    """#92687 carve-out under the #151627 fix: a reaper-closed Bot Chat the sweep then
+    archived keeps resolving by title, so unarchive_recoverable_session can resurrect it."""
+    db = SessionDB(db_path=tmp_path / 'state.db')
+    try:
+        db.create_session('canon', source='desktop')
+        assert db.set_session_title('canon', SessionDB.CANONICAL_BOT_CHAT_TITLE)
+        db.end_session('canon', 'ws_orphan_reap')
+        db._auto_archive_lineage('canon')
+        row = db.get_session_by_title(SessionDB.CANONICAL_BOT_CHAT_TITLE)
+        assert row and row['id'] == 'canon'
+        assert db.unarchive_recoverable_session('canon')
+        assert not db.get_session('canon')['archived']
+    finally:
+        db.close()

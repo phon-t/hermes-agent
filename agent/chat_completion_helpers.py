@@ -1443,7 +1443,6 @@ def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning
     _host = agent._base_url_lower
     _is_lmstudio = (agent.provider or "").strip().lower() == "lmstudio"
     _profile_endpoint = agent._reasoning_endpoint_profile() is not None
-
     _prefs = _provider_preferences_for_agent(agent)
 
     _qwen_meta = {"sessionId": agent.session_id or "hermes", "promptId": str(uuid.uuid4())} if _is_qwen else None
@@ -1457,6 +1456,9 @@ def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning
     api_messages = shape_wire_carriers(api_messages, model=agent.model, base_url=agent.base_url, scope=agent)
     # Strip image parts for non-vision models on BOTH paths (registered
     # providers with profiles used to bypass it).
+    # The custom profile fronts Ollama/vLLM/llama.cpp alike; only a llama.cpp server publishes
+    # reasoning levels via /props, and the probe returns [] for the others (#152295).
+    _is_custom_profile = _profile is not None and getattr(_profile, "name", "") == "custom"
     _common = dict(model=agent.model, messages=agent._prepare_messages_for_non_vision_model(api_messages),
         tools=tools_for_api, base_url=agent.base_url, timeout=agent._resolved_api_call_timeout(),
         max_tokens=agent.max_tokens, ephemeral_max_output_tokens=_ephemeral_out,
@@ -1466,6 +1468,7 @@ def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning
         provider_preferences=_prefs or None, openrouter_min_coding_score=agent.openrouter_min_coding_score,
         supports_reasoning=agent._supports_reasoning_extra_body(),
         lmstudio_reasoning_options=agent._lmstudio_reasoning_options_cached() if _is_lmstudio else None,
+        llamacpp_reasoning_options=agent._llamacpp_reasoning_options_cached() if _is_custom_profile else None,
         qwen_session_metadata=_qwen_meta)
     if _profile:
         # Profiles handle per-provider quirks via hooks fed the context above.

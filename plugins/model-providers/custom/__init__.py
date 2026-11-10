@@ -54,7 +54,8 @@ class CustomProfile(ProviderProfile):
         return {"enabled": True, "effort": "medium"}
 
     def build_api_kwargs_extras(
-        self, *, reasoning_config: dict | None = None, ollama_num_ctx: int | None = None, **ctx: Any
+        self, *, reasoning_config: dict | None = None, ollama_num_ctx: int | None = None,
+        llamacpp_reasoning_options: list[str] | None = None, **ctx: Any
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         extra_body: dict[str, Any] = {}
         top_level: dict[str, Any] = {}
@@ -68,6 +69,11 @@ class CustomProfile(ProviderProfile):
         # the main loop after the route rejected the reasoning field — an unset main
         # effort arrives here already filled by default_reasoning_config). Never emit
         # think=True (Ollama-only flag).
+        # A llama.cpp server publishes the levels its chat template renders distinctly
+        # (GET /props → chat_template_caps.reasoning_effort_levels); when the agent
+        # probed them, clamp onto those instead of the wide wire set, so "max" on a
+        # template that tops out at "xhigh" sends "xhigh" rather than 400ing (#152295).
+        # Other custom endpoints return no levels, so their clamp is unchanged.
         if reasoning_config and isinstance(reasoning_config, dict):
             effort = (reasoning_config.get("effort") or "").strip().lower()
             if effort == "none" or reasoning_config.get("enabled", True) is False:
@@ -80,7 +86,10 @@ class CustomProfile(ProviderProfile):
                 # "none" / "default"; any graded level ("medium", "high") 400s (#75089).
                 top_level["reasoning_effort"] = "default"
             elif effort:
-                top_level["reasoning_effort"] = clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
+                if llamacpp_reasoning_options:
+                    top_level["reasoning_effort"] = clamp_effort(effort, llamacpp_reasoning_options)
+                else:
+                    top_level["reasoning_effort"] = clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
         return extra_body, top_level
 
     def fetch_models(

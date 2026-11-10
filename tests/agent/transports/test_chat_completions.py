@@ -554,6 +554,33 @@ class TestChatCompletionsLmStudioReasoning:
         assert kw["reasoning_effort"] == "high"
 
 
+class TestChatCompletionsLlamacppReasoning:
+    """llama.cpp publishes its template's ``reasoning_effort_levels`` via ``GET /props``.
+    When the agent probed them, the custom profile clamps onto them so "max" on a
+    template topping out at "xhigh" sends "xhigh" instead of 400ing (#152295);
+    with no probe the wide OpenAI-compat wire set is unchanged.
+    """
+
+    def test_max_clamps_to_probed_top_level(self, transport):
+        kw = transport.build_kwargs(
+            model="qwen3", messages=[{"role": "user", "content": "Hi"}],
+            provider_profile=get_provider_profile("custom"),
+            supports_reasoning=True,
+            reasoning_config={"effort": "max"},
+            llamacpp_reasoning_options=["low", "medium", "xhigh"],
+        )
+        assert kw["reasoning_effort"] == "xhigh"
+
+    def test_max_unchanged_without_probe(self, transport):
+        kw = transport.build_kwargs(
+            model="qwen3", messages=[{"role": "user", "content": "Hi"}],
+            provider_profile=get_provider_profile("custom"),
+            supports_reasoning=True,
+            reasoning_config={"effort": "max"},
+        )
+        assert kw["reasoning_effort"] == "max"
+
+
 class TestChatCompletionsValidate:
 
     def test_none(self, transport):

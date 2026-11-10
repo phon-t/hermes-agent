@@ -582,6 +582,41 @@ def lmstudio_model_reasoning_options(
     return []
 
 
+def llamacpp_reasoning_effort_levels(
+    model: str,
+    base_url: Optional[str],
+    api_key: Optional[str] = None,
+    timeout: float = 5.0,
+) -> list[str]:
+    """Reasoning-effort levels a llama.cpp server's chat template renders distinctly.
+
+    Read from ``GET {root}/props`` → ``chat_template_caps.reasoning_effort_levels``
+    (lowest to highest, per the llama.cpp server README); ``[]`` when the endpoint is not
+    llama.cpp, the field is absent, or the probe fails. ``model`` is unused — a llama.cpp
+    server serves one loaded model — but the signature matches the agent's cached-probe
+    shape (``probe(model, base_url, api_key)``) so it plugs into ``_cached_probe`` (#152295).
+    """
+    from agent.reasoning_effort import EFFORT_LADDER
+    from hermes_cli.models import _urlopen_model_catalog_request
+
+    root = _strip_suffixes((base_url or "").strip().rstrip("/"), ("/v1",)) or None
+    if not root:
+        return []
+    request = urllib.request.Request(root + "/props", headers=_lmstudio_request_headers(api_key))
+    try:
+        with _urlopen_model_catalog_request(request, timeout=timeout) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception as exc:
+        logger.debug("llama.cpp /props probe at %s failed: %s", root, exc)
+        return []
+    caps = payload.get("chat_template_caps") if isinstance(payload, dict) else None
+    levels = caps.get("reasoning_effort_levels") if isinstance(caps, dict) else None
+    if not isinstance(levels, list):
+        return []
+    return [str(level).strip().lower() for level in levels
+            if isinstance(level, str) and str(level).strip().lower() in EFFORT_LADDER]
+
+
 def ollama_model_supports_thinking(
     model: str,
     base_url: Optional[str],

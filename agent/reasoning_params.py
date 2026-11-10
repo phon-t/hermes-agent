@@ -130,6 +130,15 @@ class ReasoningParamsMixin:
             return []
         return _cached_probe(self, "_lm_reasoning_opts_cache", lmstudio_model_reasoning_options, [], bool)
 
+    def _llamacpp_reasoning_options_cached(self) -> list[str]:
+        """llama.cpp's published ``reasoning_effort_levels`` from ``GET /props`` (empty when the
+        endpoint is not llama.cpp or the probe failed — the caller then keeps the wide wire set)."""
+        try:
+            from hermes_cli.models_local import llamacpp_reasoning_effort_levels
+        except Exception:
+            return []
+        return _cached_probe(self, "_llamacpp_reasoning_opts_cache", llamacpp_reasoning_effort_levels, [], bool)
+
     def _ollama_supports_thinking_cached(self) -> bool:
         """True only if Ollama's ``/api/show`` declares the ``thinking`` capability."""
         try:

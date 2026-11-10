@@ -660,12 +660,15 @@ class ChatCompletionsTransport(ProviderTransport):
         # LM Studio's probed allowed_options ride only when present, so plugin hooks written
         # against the older keyword set (no ``**context``) keep working.
         _lm_options = params.get("lmstudio_reasoning_options")
+        # llama.cpp's probed reasoning_effort_levels ride the same way (#152295).
+        _llama_options = params.get("llamacpp_reasoning_options")
         extra_body_from_profile, top_level_from_profile = profile.build_api_kwargs_extras(
             reasoning_config=reasoning_config, supports_reasoning=params.get("supports_reasoning", False),
             qwen_session_metadata=params.get("qwen_session_metadata"), model=model,
             base_url=params.get("base_url"), ollama_num_ctx=params.get("ollama_num_ctx"),
             session_id=params.get("session_id"), cache_scope_id=params.get("cache_scope_id"),
             **({"lmstudio_reasoning_options": _lm_options} if _lm_options is not None else {}),
+            **({"llamacpp_reasoning_options": _llama_options} if _llama_options is not None else {}),
         )
         api_kwargs.update(top_level_from_profile)
 

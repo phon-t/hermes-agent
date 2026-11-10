@@ -864,7 +864,13 @@ class AuthorityConnection:
             raise RuntimeStoreError('invalid_params')
         request_id = params.get('submission_id') or params.get('input_id')
         if not isinstance(request_id, str) or not request_id:
-            raise RuntimeStoreError('invalid_params')
+            # Pre-0.23 clients send no id at all: admit it as a fresh send with a server-minted
+            # id, as the Desktop shim does client-side and the legacy wire did (#151715). A minted
+            # id is unique per send, so a retry admits a new turn — clients that need idempotent
+            # retries send their own submission_id.
+            request_id = uuid.uuid4().hex
+            logger.debug('prompt.submit without submission_id/input_id: minted %s for %s',
+                         request_id, ref.session_id)
         from gateway.session_finite import admit_finite
         from gateway.session_display import submit_display_fields
         from gateway.session_surface import submit_surface_fields

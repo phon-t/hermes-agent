@@ -2836,6 +2836,8 @@ export interface PromptSubmitParams {
   session_id: string
   profile?: string | null
   text?: unknown
+  submission_id?: string | null
+  input_id?: string | null
   display_kind?: string | null
   interrupted?: boolean | null
   queued?: boolean | null

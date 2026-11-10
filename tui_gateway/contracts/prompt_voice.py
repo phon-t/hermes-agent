@@ -30,6 +30,11 @@ class PromptSubmitParams(SessionParams):
     ``truncate_before_message_id``, or the legacy ``truncate_before_user_ordinal``)."""
 
     text: JsonValue = ""
+    # Client-minted idempotency identity for this send (``input_id`` is the legacy alias). A send
+    # without one is admitted as a fresh send with a server-minted id, as the legacy wire behaved
+    # (#151715) — only a client that needs idempotent retries must send its own.
+    submission_id: str | None = None
+    input_id: str | None = None
     display_kind: str | None = None  # only "hidden" is honoured; anything else renders as a user row
     interrupted: bool | None = None  # client-side barge-in: the turn's model message carries the note
     queued: bool | None = None  # client queue drain — the busy path must hold it, never redirect/steer

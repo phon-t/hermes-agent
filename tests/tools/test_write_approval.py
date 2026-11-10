@@ -135,6 +135,35 @@ def test_load_on_disk_store_honors_configured_limits_and_permissions(hermes_home
     assert fallback.memory_enabled is True
     assert fallback.user_profile_enabled is True
 
+def test_approve_applies_configured_char_limits(hermes_home):
+    """Regression for #151655: ``/memory approve`` must apply against the configured
+    limits, not ``MemoryStore()`` defaults. A user batch landing between the default
+    user limit (1375) and the configured one (2500) must approve."""
+    import hermes_cli.config as cfg
+    c = cfg.load_config()
+    c.setdefault("memory", {})["memory_char_limit"] = 4000
+    c["memory"]["user_char_limit"] = 2500
+    c["memory"]["write_approval"] = True
+    cfg.save_config(c)
+
+    from tools.memory_tool import load_on_disk_store, memory_tool
+    from tools import write_approval as wa
+    from hermes_cli.write_approval_commands import handle_pending_subcommand
+
+    store = load_on_disk_store()
+    assert store.memory_char_limit == 4000
+    assert store.user_char_limit == 2500
+
+    content = "u" * 2300  # over the 1375 default, under the configured 2500
+    r = json.loads(memory_tool("add", "user", content, store=store))
+    assert r.get("staged") is True and r.get("pending_id"), r
+
+    out = handle_pending_subcommand(
+        wa.MEMORY, ["approve", r["pending_id"]], memory_store=load_on_disk_store())
+    assert "Approved 1" in out, out
+    assert wa.pending_count("memory") == 0
+    assert any(len(e) == 2300 for e in load_on_disk_store().user_entries)
+
 # ---------------------------------------------------------------------------
 # Shared command handler
 # ---------------------------------------------------------------------------

@@ -67,6 +67,46 @@ def _rename_alpha(root, homes):
 
 
 @pytest.mark.asyncio
+async def test_renamed_profile_bot_chat_restores(tmp_path, monkeypatch):
+    """#152554: a renamed profile's canonical Bot Chat keeps its policy receipt (route, entry
+    key and origin move to the new name) and the Bot Chat delivery target still resolves to it."""
+    from gateway.session_authorities import owner_scope
+    from gateway.session_bot import _target, displaceable_bot_chat
+    from gateway.session_contract import SessionActor
+    from gateway.session_local import create_local_session
+    from gateway.session_local_recovery import restore_local_session
+    from gateway.session_local_title import title_new_session
+    from hermes_state_local import local_receipt
+    root, homes = _reserve_homes(tmp_path, monkeypatch)
+    async with _serving(root, homes, homes[1][1]) as alpha:
+        actor = SessionActor('owner', alpha.profile_id, frozenset({'session:create', 'session:read'}), 'socket')
+        with owner_scope(alpha):
+            chat = create_local_session(alpha, actor, {'request_id': 'bot-chat:' + alpha.profile_id,
+                                                       'source': 'cli', 'cwd': str(tmp_path),
+                                                       'model': 'frozen', 'toolsets': []})
+            title_new_session(alpha, chat, 'Bot Chat')
+        sid = chat.session_id
+
+    renamed_homes, renamed = _rename_alpha(root, homes)
+    async with _serving(root, renamed_homes, renamed) as gamma:
+        gamma.sessions.clear()  # drive the restore/target paths themselves
+        receipt = local_receipt(gamma.db, sid)
+        assert receipt['route'] == receipt['entry']['session_key'] == f'agent:gamma:local:dm:{sid}'
+        assert receipt['entry']['origin']['profile'] == 'gamma'
+        row = gamma.db.get_session_by_title('Bot Chat')
+        assert row is not None and row['id'] == sid
+        assert displaceable_bot_chat(gamma, row) is None
+        with owner_scope(gamma):
+            restored = restore_local_session(gamma, sid)
+        live = gamma.sessions[restored.session_id]
+        assert (live.source.profile, live.route) == ('gamma', f'agent:gamma:local:dm:{sid}')
+        actor = SessionActor('owner', gamma.profile_id,
+                             frozenset({'session:create', 'session:read', 'session:submit'}), 'socket')
+        ref, _live, _entry = await _target(gamma, actor)
+        assert ref.session_id == sid
+
+
+@pytest.mark.asyncio
 async def test_moved_api_receipt_restores_only_under_its_own_profile(tmp_path, monkeypatch):
     from gateway.session_api import bind_api_session, restore_api_session
     root, homes = _reserve_homes(tmp_path, monkeypatch)

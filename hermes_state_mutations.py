@@ -104,9 +104,18 @@ def apply_action(db, conn, session_id, operation, payload, *, prepared=None):
     result = {}
     for key, value in payload.items():
         if key == 'title':
+            # A rename through a stale (ended) segment id lands on the conversation's
+            # live tip (#152624): the listing projects a compressed lineage onto its
+            # tip, so a title written onto the dead segment never shows. Resolved on
+            # this transaction's connection, so no rotation can publish between
+            # finding the tip and writing it. A name the ended ancestor already
+            # holds moves to the tip through _resolve_title_conflict's
+            # compression-ancestor rule. The lineage-wide flags below already
+            # resolve through the lineage, so only the title needs the tip.
+            target = db._compression_tip_on(conn, session_id)
             affected.update(db._set_session_title_in_transaction(
-                conn, session_id, value, source=db.TITLE_SOURCE_USER))
-            result[key] = conn.execute('SELECT title FROM sessions WHERE id=?', (session_id,)).fetchone()[0]
+                conn, target, value, source=db.TITLE_SOURCE_USER))
+            result[key] = conn.execute('SELECT title FROM sessions WHERE id=?', (target,)).fetchone()[0]
         else:
             column = 'last_read_at' if key == 'unread' else key
             stored = (0.0 if value else time.time()) if key == 'unread' else int(value)

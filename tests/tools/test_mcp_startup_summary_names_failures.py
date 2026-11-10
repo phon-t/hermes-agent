@@ -51,6 +51,33 @@ def test_register_summary_names_failed_server_with_reason(monkeypatch, tmp_path,
     assert "no-such-mcp-binary" in summaries[0]
 
 
+def test_summary_counts_adopted_shared_connection_as_connected(monkeypatch, caplog):
+    """A server another profile owns that this scope adopted (#152216) is connected, not a
+    phantom ``failed ... (not attempted (in retry cooldown))``: adoption runs during the
+    discovery pass, before the summary is computed, and no connect error was ever recorded
+    for this scope's key — the tools work, so the summary must say so."""
+    from tools import mcp_tool
+    from tools.mcp_tool_discovery import _log_summary
+
+    monkeypatch.setattr(mcp_tool, "_mcp_registry_scope", lambda: "adopter")
+    owner_key = ("owner", "apple")
+    with mcp_tool._lock:
+        mcp_tool._servers[owner_key] = SimpleNamespace(
+            _registered_tool_names=["mcp__apple__reminders_lists"], session=object())
+        mcp_tool._server_tool_scopes[owner_key] = {"owner", "adopter"}
+    try:
+        with caplog.at_level(logging.INFO, logger="tools.mcp_tool"):
+            _log_summary("  MCP:", ["apple"])
+    finally:
+        with mcp_tool._lock:
+            mcp_tool._servers.pop(owner_key, None)
+            mcp_tool._server_tool_scopes.pop(owner_key, None)
+
+    summaries = _summaries(caplog)
+    assert len(summaries) == 1, summaries
+    assert summaries[0] == "  MCP: 1 tool(s) from 1 server(s)", summaries
+
+
 def test_summary_marks_candidate_skipped_for_cooldown(caplog, _clean_registry):
     """A candidate this pass never attempted (still inside its retry cooldown) has no fresh
     connect error: it is named with an explicit "not attempted" reason instead of vanishing

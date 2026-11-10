@@ -1174,7 +1174,7 @@ def _ask_yes_no(prompt: str) -> bool:
 
 def migrate_config(interactive: bool = True, quiet: bool = False) -> dict[str, Any]:
     """Migrate config to latest version, prompting for new required fields."""
-    results = {"env_added": [], "config_added": [], "warnings": []}
+    results = {"env_added": [], "config_added": [], "warnings": [], "floor_refused": False}
 
     stamp_missing_config()  # a missing config.yaml reads as current below: stamp its legacy browser settings
     # Validate before any side effect: sanitize_env_file() rewrites .env, never for refused (malformed) YAML.
@@ -1202,6 +1202,7 @@ def migrate_config(interactive: bool = True, quiet: bool = False) -> dict[str, A
         has_explicit_version and current_ver < SUPPORT_FLOOR_VERSION and current_ver < latest_ver)
     if floor_refused:
         msg = support_floor_message()
+        results["floor_refused"] = True
         results["warnings"].append(msg)
         # stderr so it is visible even on quiet startup paths.
         sys.stderr.write(f"⚠ hermes config: {msg}\n")
@@ -3654,13 +3655,16 @@ def _cmd_config_migrate(args):
     print()
     results = migrate_config(interactive=True, quiet=False)
     print()
-    if results["env_added"] or results["config_added"]:
+    if not results.get("floor_refused") and (results["env_added"] or results["config_added"]):
         print(color("✓ Configuration updated!", Colors.GREEN))
     if results["warnings"]:
         print()
         for warning in results["warnings"]:
             print(color(f"  ⚠️  {warning}", Colors.YELLOW))
     print()
+    if results.get("floor_refused"):
+        # The config was refused, not migrated: a zero exit would tell scripts it is current.
+        sys.exit(1)
 
 
 def _cmd_config_check(args):

@@ -887,6 +887,52 @@ class TestConfigSupportFloor:
         assert captured.out == ""
         assert results["warnings"]
 
+    def test_migrate_config_reports_floor_refused(self, tmp_path):
+        # #152717: the refusal carries a flag so callers can tell a refused
+        # migrate from a successful one.
+        config_path, original = self._write_config(tmp_path, {"_config_version": 1})
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            results = migrate_config(interactive=False, quiet=True)
+        assert results["floor_refused"] is True
+        assert config_path.read_text(encoding="utf-8") == original
+
+    def test_config_migrate_below_floor_exits_nonzero(self, tmp_path, monkeypatch, capsys):
+        # #152717: `hermes config migrate` on a below-floor config changed
+        # nothing and exited 0, so scripts testing only the exit code could
+        # not tell the file is not current.
+        import hermes_cli.config as cfg_mod
+
+        config_path, original = self._write_config(tmp_path, {"_config_version": 1})
+        (tmp_path / ".env").write_text("")
+        # Decline every interactive offer; required-key prompts are skipped
+        # on an empty answer, so no stdin read can block the test.
+        monkeypatch.setattr("builtins.input", lambda *args: "")
+        monkeypatch.setattr(cfg_mod, "masked_secret_prompt", lambda prompt: "")
+        monkeypatch.setattr(cfg_mod, "get_missing_skill_config_vars", list)
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            with pytest.raises(SystemExit) as excinfo:
+                cfg_mod._cmd_config_migrate(None)
+        assert excinfo.value.code == 1
+        assert config_path.read_text(encoding="utf-8") == original
+        captured = capsys.readouterr()
+        assert "can no longer be auto-migrated" in captured.out
+        assert "can no longer be auto-migrated" in captured.err
+        # A refused migrate must not claim success either.
+        assert "Configuration updated!" not in captured.out
+
+    def test_config_migrate_current_config_exits_zero(self, tmp_path, monkeypatch, capsys):
+        # Control for the floor refusal: a current config reports up to
+        # date and returns normally (no SystemExit).
+        import hermes_cli.config as cfg_mod
+
+        self._write_config(tmp_path, {"_config_version": DEFAULT_CONFIG["_config_version"]})
+        (tmp_path / ".env").write_text("")
+        monkeypatch.setattr(cfg_mod, "get_missing_env_vars", lambda required_only=True: [])
+        monkeypatch.setattr(cfg_mod, "get_missing_config_fields", list)
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            cfg_mod._cmd_config_migrate(None)
+        assert "Configuration is up to date!" in capsys.readouterr().out
+
     def test_floor_message_uses_display_hermes_home(self):
         from hermes_cli.config_migrations import support_floor_message
         from hermes_constants import display_hermes_home

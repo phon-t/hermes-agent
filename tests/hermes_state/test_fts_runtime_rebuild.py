@@ -153,6 +153,13 @@ class TestRuntimeFtsRebuild:
             ("python3", "-m", "other.module", "hermes_cli.main"),
             ("python3", "-c", "hermes_cli.main"),
             ("python3", "-Icprint('hermes_cli.main')", "hermes_cli/main.py"),
+            # #152715: near-miss module names must not match on a prefix —
+            # neither spelling is a runnable entry point (`gateway` and
+            # `tui_gateway` have no `__main__.py`).
+            ("python3", "-m", "acp_adapterx"),
+            ("python3", "-m", "gateway"),
+            ("python3", "-m", "tui_gateway"),
+            ("python3", "-m", "run_agentx"),
         ),
     )
     def test_uninspectable_non_hermes_process_is_not_a_holder(self, argv):
@@ -170,6 +177,13 @@ class TestRuntimeFtsRebuild:
             ("/usr/bin/python3", "-mhermes_cli.main", "gateway"),
             ("/usr/bin/python3", "-W", "ignore", "-m", "hermes_cli.main"),
             ("/usr/bin/python3", "-Xdev", "-m", "hermes_cli.main"),
+            # #152715: every `-m` entry point the product writes counts as
+            # Hermes, including the `.entry` submodule spellings.
+            ("/usr/bin/python3", "-m", "acp_adapter.entry"),
+            ("/usr/bin/python3", "-m", "tui_gateway.entry"),
+            ("/usr/bin/python3", "-m", "gateway.run"),
+            ("/usr/bin/python3", "-m", "run_agent"),
+            ("/usr/bin/python3", "-m", "acp_adapter.entry", "--stdio"),
             (
                 "/opt/hermes-agent/.venv/bin/python",
                 "/opt/hermes-agent/hermes_cli/main.py",

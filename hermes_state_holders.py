@@ -34,7 +34,17 @@ logger = logging.getLogger(__name__)
 
 _IS_WINDOWS = sys.platform == "win32"
 _HERMES_EXECUTABLES = frozenset({"hermes", "hermes-agent", "hermes-acp"})
-_HERMES_PYTHON_MODULES = frozenset({"acp_adapter", "hermes_cli.main"})
+# Every `-m` entry point the product writes: the bare packages, their `.entry` submodules
+# (`acp_adapter/entry.py`, `tui_gateway/entry.py`), the dedicated gateway entry point and the
+# agent runner. A submodule spelling of one of these is the same entry point. See #152715.
+_HERMES_PYTHON_MODULES = frozenset({
+    "acp_adapter",
+    "acp_adapter.entry",
+    "hermes_cli.main",
+    "tui_gateway.entry",
+    "gateway.run",
+    "run_agent",
+})
 _HERMES_PYTHON_SCRIPTS = frozenset({"hermes_cli/main.py", "run_agent.py"})
 _PYTHON_SHORT_OPTIONS_WITH_OPERANDS = frozenset({"Q", "W", "X"})
 _PYTHON_LONG_OPTIONS_WITH_OPERANDS = frozenset(
@@ -134,7 +144,12 @@ def _looks_like_hermes(argv: Sequence[str]) -> bool:
     kind, value = target
     normalized = value.lower().replace("\\", "/")
     if kind == "module":
-        return normalized in _HERMES_PYTHON_MODULES
+        # A submodule spelling of a known entry point (`acp_adapter.entry`) is the same
+        # process; the `.` boundary keeps `acp_adapterx` / `gateway.runaway` out.
+        return any(
+            normalized == name or normalized.startswith(name + ".")
+            for name in _HERMES_PYTHON_MODULES
+        )
     return any(
         normalized == script or normalized.endswith(f"/{script}")
         for script in _HERMES_PYTHON_SCRIPTS

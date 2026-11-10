@@ -1297,8 +1297,10 @@ DEFAULT_CONFIG = {
         "user_profile_enabled": True,
         "prefetch_spill_enabled": False,  # External recall opt-in to hooks.output_spill.
         # Approval gate for memory writes on BOTH foreground turns and the background review fork.
-        # true = foreground writes prompt inline; background writes are staged (/memory
-        # pending|approve <id>|reject <id>). To disable memory: memory_enabled.
+        # true = foreground writes prompt inline only where the executing thread has a registered
+        # approval callback (ACP editor sessions); gateway-backed turns (classic CLI, Desktop,
+        # TUI, messaging) always stage (/memory pending|approve <id>|reject <id>). To disable
+        # memory: memory_enabled. See #152217.
         "write_approval": False,
         "memory_char_limit": 2200,   # ~800 tokens at 2.75 chars/token
         "user_char_limit": 1375,     # ~500 tokens at 2.75 chars/token

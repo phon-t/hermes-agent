@@ -77,7 +77,7 @@ The most common report looks like this: you tell the agent where something lives
 
    If the fact is not there, the model claimed a save it never made. Small local models (roughly under 30B parameters) and models with weak tool-calling do this often — they produce the confirmation without the tool call. Ask explicitly ("use the `memory` tool to save the vault path `/srv/vault`") and confirm the entry landed in the file. If it keeps happening, the fix is a stronger model for setup, not more instructions; once the entries exist, a smaller model reads them fine because they arrive in the system prompt.
 
-2. **Check the write wasn't staged.** With `write_approval: true`, writes outside the interactive CLI are held for review and never reach the file until approved — run `/memory pending` and `/memory approve all`. See [Controlling memory writes](#controlling-memory-writes-write_approval).
+2. **Check the write wasn't staged.** With `write_approval: true`, writes are held for review and never reach the file until approved — run `/memory pending` and `/memory approve all`. (Only ACP editor sessions prompt inline; the interactive CLI stages too.) See [Controlling memory writes](#controlling-memory-writes-write_approval).
 
 3. **Check you are reading the same memory you wrote.** Memory is per [profile](../profiles.md): `hermes -p work` (or `work chat` / `work gateway start`) reads `~/.hermes/profiles/work/memories/`, not `~/.hermes/memories/`. A CLI session in the default profile and a Telegram bot on another profile do not share notes. `hermes profile list` shows what exists.
 
@@ -336,7 +336,7 @@ first, set `memory.write_approval: true`. It's a simple on/off gate applied to
 | `write_approval` | Behaviour |
 |------------------|-----------|
 | `false` (default) | Write freely — the gate is off (the pre-gate behaviour). |
-| `true` | Require approval before anything is saved. In the interactive CLI, foreground writes prompt you inline (entries are small enough to read in full). Everywhere else — messaging platforms, scripts, and the background self-improvement review — writes are **staged** for review with `/memory pending`. |
+| `true` | Require approval before anything is saved. Foreground writes prompt you inline only in ACP editor sessions (entries are small enough to read in full). Everywhere else — the interactive CLI, Desktop, TUI, messaging platforms, scripts, and the background self-improvement review — writes are **staged** for review with `/memory pending`. |
 
 > To turn memory off entirely (not just gate it), set both `memory_enabled: false` and `user_profile_enabled: false`. When both built-in stores are disabled, the built-in `memory` tool is automatically hidden.
 

@@ -263,7 +263,8 @@ def _memory_tool(action, target, content, old_text, new_text, operations, store)
         denied = _background_delete_gate(store, action, operations, target)
         if denied is not None:
             return "rejected", denied
-        # Approval gate: stages (background/gateway) or prompts inline (CLI); off by default.
+        # Approval gate: stages unless the executing thread has a registered approval callback
+        # (ACP editor sessions); gateway-backed turns always stage (#152217). Off by default.
         gate_result = _apply_write_gate(store, "batch", target, None, None, operations)
         if gate_result is not None:
             return "rejected", gate_result

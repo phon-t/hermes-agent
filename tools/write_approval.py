@@ -4,9 +4,16 @@
 A per-subsystem boolean ``write_approval`` gates the agent's cross-session writes —
 **memory** (MEMORY.md / USER.md) and **skills** (SKILL.md + files) — from either
 origin (**foreground** turn or **background_review** fork). ``false`` (default)
-writes freely; ``true`` never commits directly: it prompts inline (memory,
-interactive CLI only) or **stages** the write under
-``<HERMES_HOME>/pending/{memory,skills}/<id>.json`` for out-of-band review.
+writes freely; ``true`` never commits directly: it prompts inline only where the
+thread executing the memory tool has a registered approval callback (ACP editor
+sessions, whose turns run in-process with one bound per turn thread), and
+**stages** the write under ``<HERMES_HOME>/pending/{memory,skills}/<id>.json``
+everywhere else for out-of-band review. Gateway-backed surfaces (classic CLI,
+Desktop, TUI, messaging gateways) always stage: the agent runs in the gateway
+daemon, where that thread-local callback is never registered, and the memory
+path never uses the gateway ``approval.request`` round-trip terminal approvals
+use (#152217). The inline prompt is therefore NOT available on the classic CLI
+despite the historical wording that said otherwise.
 """
 
 from __future__ import annotations
@@ -200,9 +207,12 @@ def _staged(subsystem: str) -> GateDecision:
 
 def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: str = "") -> GateDecision:
     """Decide what to do with a pending write: gate off → allow; gate on + skills (any origin) or
-    background → stage; gate on + memory + foreground → inline prompt when an interactive channel
-    exists, else stage. The gate only ever delays a write, never silently refuses it; ``blocked``
-    is produced only when the user actively denies the inline prompt."""
+    background → stage; gate on + memory + foreground → inline prompt when the executing thread
+    has a registered approval callback (ACP editor sessions), else stage. Gateway-backed turns
+    (classic CLI, Desktop, TUI, messaging) always stage — the memory tool runs in the gateway
+    daemon, where no callback is ever registered (#152217). The gate only ever delays a write,
+    never silently refuses it; ``blocked`` is produced only when the user actively denies the
+    inline prompt."""
     if not write_approval_enabled(subsystem):
         return GateDecision(allow=True)
     # Skills are too big to review inline; a background write runs in a daemon thread with no user.
@@ -222,6 +232,15 @@ def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
     ``prompt_dangerous_approval``: that wrapper falls back to ``input()`` (deadlock-prone under
     prompt_toolkit; silent deny in gateway sessions) and turns callback errors into a deny, whereas
     here a missing channel or failed prompt must stage instead.
+
+    The callback is thread-local to the process executing the memory tool, so the prompt only fires
+    where that process binds one: ACP editor sessions (``acp_adapter/server.py`` binds its
+    ``request_permission`` callback on the executor thread running the turn) and other in-process
+    runs. Gateway-backed turns (classic CLI, Desktop, TUI, messaging) execute the memory tool in
+    the gateway daemon, where no callback is ever registered, so they always stage (#152217) —
+    the memory path never sends a gateway ``approval.request`` the way terminal approvals do.
+    Routing it through that round-trip is a separate, larger change; until then the staging
+    behaviour is the documented one, not a prompt that never arrives.
 
     ``hermes chat -q`` (and so every kanban worker), cron and unattended platforms can register a callback too,
     but nobody answers it: stage at once instead of waiting the approval timeout. See #15216.

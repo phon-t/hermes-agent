@@ -317,9 +317,12 @@ def test_handle_approval_off(hermes_home):
     assert "off" in out
 
 # ---------------------------------------------------------------------------
-# Inline (interactive CLI) approval path — regression for the bug where the
-# per-thread approval callback was never passed to prompt_dangerous_approval,
-# so every gated foreground memory write was silently denied.
+# Inline approval path — regression for the bug where the per-thread approval
+# callback was never passed to prompt_dangerous_approval, so every gated
+# foreground memory write was silently denied. The prompt fires only where the
+# thread executing the memory tool has a callback registered (ACP editor
+# sessions); gateway-backed turns (classic CLI, Desktop, TUI, messaging) run
+# the tool in the daemon with no callback, so they always stage (#152217).
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -327,6 +330,24 @@ def approval_callback_cleanup():
     yield
     from tools.terminal_tool import set_approval_callback
     set_approval_callback(None)
+
+def test_foreground_memory_write_stages_without_registered_callback(
+    hermes_home, approval_callback_cleanup):
+    """#152217: the gateway daemon never registers the thread-local approval callback,
+    so a gated foreground memory write there must stage — never prompt, never deny.
+    (No callback registered on this thread = the daemon's situation.)"""
+    from tools.memory_tool import memory_tool, MemoryStore
+    from tools.terminal_tool import set_approval_callback
+    from tools import write_approval as wa
+    _set_approval("memory", True)
+    set_approval_callback(None)
+
+    store = MemoryStore(); store.load_from_disk()
+    r = json.loads(memory_tool("add", "memory", "gateway fact", store=store))
+    assert r["success"] is True
+    assert r.get("staged") is True and r.get("pending_id"), r
+    assert store.memory_entries == []
+    assert wa.pending_count("memory") == 1
 
 def test_memory_inline_approve_writes(hermes_home, approval_callback_cleanup):
     from tools.memory_tool import memory_tool, MemoryStore

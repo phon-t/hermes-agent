@@ -212,6 +212,18 @@ def reconcile_pending(*, allow_connect=True):
                     atomic_json_write(journal, record, mode=0o600, fsync_dir=True)
                 continue
             success, output, answer, error = state['result']
+            # A newer live firer owns this job now: defer A's whole tail (no output, no
+            # delivery, no job mark) and retain the journal. A's own firer is provably dead
+            # (execution_owner_live above), so any live claim is a successor's, and clearing
+            # it would discard that run as "Fire claim ownership lost" (#152296). Once the
+            # successor settles, its own owner-fenced mark clears the claim and a later tick
+            # recovers A. A stale claim never defers: it is nobody's.
+            from cron.jobs import live_fire_claim_owner
+            current = get_job(params['job_id'])
+            if current is not None and live_fire_claim_owner(current) is not None:
+                logging.getLogger(__name__).debug(
+                    'Cron receipt recovery deferred: job %s has a live fire claim', params['job_id'])
+                continue
             job = dict(state['job'], **(state.get('job_flags') or {}))
             job['execution_id'] = params['request_id']
             # The same result verdicts as the ordinary tail: an agent-declared [CRON_FAILURE] and a

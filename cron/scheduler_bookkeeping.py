@@ -84,9 +84,20 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
         mark_kwargs["status"] = "blocked_config"
+    if recovered:
+        # The receipt is for an older, dead firer: the terminal mark must not clear a newer
+        # live firer's claim even if one was acquired after recovery's deferral check (#152296).
+        mark_kwargs["refuse_live_claim"] = True
     # A run that removed its own record has nothing left to mark; the delivery above is its result.
     marked = scheduler.self_removal_delivery_allowed(job["id"]) or scheduler.mark_job_run(
         job["id"], d.success, d.error, **mark_kwargs)
+    if recovered and not marked:
+        from cron.jobs import get_job, live_fire_claim_owner
+        current = get_job(job["id"])
+        if current is not None and live_fire_claim_owner(current) is not None:
+            # A newer live firer owns the job: defer the whole recovery tail — keep the
+            # journal and A's execution unsettled so a later tick retries after it finishes.
+            return False
     if fire_owner is not None and not marked:
         scheduler.finish_execution(
             execution_id, success=False,

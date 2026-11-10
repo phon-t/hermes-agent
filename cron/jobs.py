@@ -2494,6 +2494,7 @@ def mark_job_run(
     ladder_rung: bool = False,
     quota_hold_seconds: Optional[float] = None,
     recover_consumed_fire: bool = False,
+    refuse_live_claim: bool = False,
 ) -> bool:
     """Mark a job as run: update last_run_at/last_status, bump completed, recompute next_run_at,
     and retire the record as a terminal completion when the repeat limit is reached. A manual run
@@ -2516,6 +2517,10 @@ def mark_job_run(
     it on every tick. ``recover_consumed_fire`` lets a scheduled sparse cron recover its
     consumed fire when the provider reopens; manual runs retain the natural schedule
     (cron/quota_hold.py, #89376).
+
+    ``refuse_live_claim``: receipt recovery's fence on the destructive write — refuse (False,
+    nothing touched) when the job currently carries a live fire claim, so a newer firer that
+    claimed between recovery's deferral check and this write keeps its claim (#152296).
     """
     def apply(jobs, _i, job):
         if execution_id is not None and execution_id in job.get("canonical_completions", []):
@@ -2527,6 +2532,11 @@ def mark_job_run(
                     "mark_job_run: job_id %s fire claim owner changed; discarding stale completion",
                     job_id)
                 return False
+        if refuse_live_claim and live_fire_claim_owner(job) is not None:
+            logger.warning(
+                "mark_job_run: job_id %s has a live fire claim; deferring stale completion",
+                job_id)
+            return False
         now = _hermes_now().isoformat()
         extra = extra_fire.is_extra(job)  # read before the outcome clears the claim
         held = extra_fire.held_markers(job) if extra else {}
@@ -2791,6 +2801,18 @@ def claim_job_for_fire(
         return dict(copy.deepcopy(job), _scheduled_instant=instant) if return_job else True
 
     return _under_fire_fence(job_id, lambda: _with_job(job_id, apply, False))
+
+
+def live_fire_claim_owner(job: dict[str, Any]) -> Optional[str]:
+    """The ``by`` token of *job*'s fire claim while that claim is live, else None. A live claim
+    belongs to a firer running the job right now: receipt recovery of an older, dead firer
+    (whose own execution owner is provably gone) must never clear it (#152296). A stale or
+    malformed claim is nobody's, so it never defers recovery."""
+    claim = job.get("fire_claim") if isinstance(job, dict) else None
+    if isinstance(claim, dict) and _claim_is_live(claim, _hermes_now(), FIRE_CLAIM_TTL_SECONDS):
+        owner = claim.get("by")
+        return str(owner) if owner else None
+    return None
 
 
 def heartbeat_fire_claim(job_id: str, *, expected_owner: str) -> bool:

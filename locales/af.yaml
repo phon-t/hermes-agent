@@ -2564,6 +2564,7 @@ cli:
     label_context: "Konteks"
     recent_intro: "(._.) Nog geen boodskappe in die huidige geselsie nie — hier is onlangse sessies wat jy kan hervat:"
     recent_header: "Onlangse sessies:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "Titel"
     column_preview: "Voorskou"
     column_last_active: "Laas Aktief"

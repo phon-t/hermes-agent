@@ -2564,6 +2564,7 @@ cli:
     label_context: "Contesto"
     recent_intro: "(._.) Nessun messaggio nella chat corrente — ecco le sessioni recenti che puoi riprendere:"
     recent_header: "Sessioni recenti:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "Titolo"
     column_preview: "Anteprima"
     column_last_active: "Ultima attività"

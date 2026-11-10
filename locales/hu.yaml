@@ -2581,6 +2581,7 @@ cli:
     label_context: "Kontextus"
     recent_intro: "(._.) Még nincs üzenet a jelenlegi beszélgetésben — itt vannak a legutóbbi munkamenetek, amelyeket folytathatsz:"
     recent_header: "Legutóbbi munkamenetek:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "Cím"
     column_preview: "Előnézet"
     column_last_active: "Utoljára aktív"

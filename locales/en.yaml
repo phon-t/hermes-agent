@@ -2664,6 +2664,7 @@ cli:
     label_context: "Context"
     recent_intro: "(._.) No messages in the current chat yet — here are recent sessions you can resume:"
     recent_header: "Recent sessions:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "Title"
     column_preview: "Preview"
     column_last_active: "Last Active"

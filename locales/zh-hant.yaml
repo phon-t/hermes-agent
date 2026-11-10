@@ -2564,6 +2564,7 @@ cli:
     label_context: "上下文"
     recent_intro: "(._.) 目前聊天尚無訊息 — 以下是可恢復的近期工作階段："
     recent_header: "近期工作階段："
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "標題"
     column_preview: "預覽"
     column_last_active: "最近活動"

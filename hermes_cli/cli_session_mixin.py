@@ -50,6 +50,17 @@ def _squash(text: str, limit: int = 120) -> str:
     return text[: limit - 1] + "…" if len(text) > limit else text
 
 
+_OTHER_SURFACE_LABELS = {"gui": "Desktop", "desktop": "Desktop", "tui": "TUI"}
+
+
+def _other_surface_label(row: dict[str, Any]) -> str:
+    """Display name for an other-surface row's origin: a ``local`` row's creator, else its source."""
+    source = str(row.get("source") or "").strip()
+    if source == "local":
+        source = str(row.get("created_source") or "").strip() or source
+    return _OTHER_SURFACE_LABELS.get(source, source or "other")
+
+
 def _dim_notice(cli, msg: str, quiet: bool) -> None:
     """Print a dim notice — raw to stderr on quiet (pre-TUI) paths. Module-level so tests can
     call the resume helpers unbound against a minimal stand-in."""
@@ -374,17 +385,30 @@ class CLISessionMixin:
         self._console_print("\n".join(lines), highlight=False, markup=False)
 
     def _list_recent_sessions(self, limit: int = 10) -> list[dict[str, Any]]:
-        """Return recent CLI sessions for in-chat browsing/resume affordances."""
+        """Recent sessions for in-chat browsing/resume affordances: this CLI's own rows first,
+        then other surfaces' (Desktop ``gui`` rows included, #151584). ``is_other_surface`` marks
+        the second section so the table and the numbered resolution stay one list; the cli rows
+        keep their order and numbering. The other section over-fetches (``limit * 4``): the shared
+        listing window is all-sources, and the cli rows inside it are dropped by the dedup below."""
         if not self._session_db:
             return []
         try:
             from hermes_cli.session_listing import query_session_listing
             from hermes_state_sessions import INTERNAL_LISTING_SOURCES
 
-            return query_session_listing(
+            exclude = list(INTERNAL_LISTING_SOURCES)
+            cli_rows = query_session_listing(
                 self._session_db, source="cli", current_session_id=self.session_id,
                 include_all_sources=False, include_unnamed=True, limit=limit,
-                exclude_sources=list(INTERNAL_LISTING_SOURCES))
+                exclude_sources=exclude)
+            other_rows = query_session_listing(
+                self._session_db, source=None, current_session_id=self.session_id,
+                include_all_sources=True, include_unnamed=True, limit=limit * 4,
+                exclude_sources=exclude + ["cli"])
+            seen = {row.get("id") for row in cli_rows}
+            others = [{**row, "is_other_surface": True} for row in other_rows
+                      if row.get("id") not in seen]
+            return cli_rows + others[:limit]
         except Exception:
             return []
 
@@ -400,21 +424,35 @@ class CLISessionMixin:
 
         from hermes_cli.timefmt import relative_time as _relative_time
 
+        def _print_table(rows: list[dict[str, Any]], start: int) -> None:
+            _cli_visible_print(
+                f"  {'#':<3} {t('cli.session.column_title'):<32} {t('cli.session.column_preview'):<40} "
+                f"{t('cli.session.column_last_active'):<13} {t('cli.session.column_id')}")
+            _cli_visible_print(f"  {'─' * 3} {'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
+            for offset, session in enumerate(rows):
+                title = session.get("title") or "—"
+                preview = (session.get("preview") or "")[:38]
+                last_active = _relative_time(session.get("last_active"), session_id=session.get("id"))
+                _cli_visible_print(f"  {start + offset:<3} {title:<32} {preview:<40} {last_active:<13} {session['id']}")
+
         _cli_visible_print()
         if reason == "history":
             _cli_visible_print(t("cli.session.recent_intro"))
         else:
             _cli_visible_print(f"  {t('cli.session.recent_header')}")
         _cli_visible_print()
-        _cli_visible_print(
-            f"  {'#':<3} {t('cli.session.column_title'):<32} {t('cli.session.column_preview'):<40} "
-            f"{t('cli.session.column_last_active'):<13} {t('cli.session.column_id')}")
-        _cli_visible_print(f"  {'─' * 3} {'─' * 32} {'─' * 40} {'─' * 13} {'─' * 24}")
-        for idx, session in enumerate(sessions, start=1):
-            title = session.get("title") or "—"
-            preview = (session.get("preview") or "")[:38]
-            last_active = _relative_time(session.get("last_active"), session_id=session.get("id"))
-            _cli_visible_print(f"  {idx:<3} {title:<32} {preview:<40} {last_active:<13} {session['id']}")
+        cli_rows = [s for s in sessions if not s.get("is_other_surface")]
+        other_rows = [s for s in sessions if s.get("is_other_surface")]
+        if cli_rows:
+            _print_table(cli_rows, start=1)
+        if other_rows:
+            # Cross-surface sessions (Desktop, TUI, …) after the CLI rows, still numbered on the
+            # same list so `/resume <number>` resolves them (#151584).
+            sources = ", ".join(sorted({_other_surface_label(s) for s in other_rows}))
+            _cli_visible_print()
+            _cli_visible_print(f"  {t('cli.session.recent_other_surfaces', sources=sources)}")
+            _cli_visible_print()
+            _print_table(other_rows, start=len(cli_rows) + 1)
         _cli_visible_print()
         _cli_visible_print(f"  {t('cli.session.resume_usage')}")
         _cli_visible_print(f"  {t('cli.session.resume_example')}")

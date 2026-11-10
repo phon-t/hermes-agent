@@ -2564,6 +2564,7 @@ cli:
     label_context: "Контекст"
     recent_intro: "(._.) У поточному чаті ще немає повідомлень — ось недавні сеанси, які можна відновити:"
     recent_header: "Недавні сеанси:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "Назва"
     column_preview: "Уривок"
     column_last_active: "Остання активність"

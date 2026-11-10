@@ -71,7 +71,12 @@ def test_continue_and_sessions_find_cli_session_behind_newer_desktop_rows(tmp_pa
     """Bare ``hermes -c``, ``/sessions`` and ``/resume`` reach the CLI session behind 200 newer rows."""
     db = SessionDB(db_path=tmp_path / "state.db")
     _populate(db, [("cli-session", "local", "cli", 1_000_000), *_newer_locals(200, start=2_000_000, prefix="d")])
-    assert _recent_cli_ids(db) == (["cli-session"], ["cli-session"])
+    listed, via_command = _recent_cli_ids(db)
+    assert listed == ["cli-session"]
+    # The in-chat list keeps the CLI row first, then the newer Desktop rows as its other-surfaces
+    # section (#151584) — the CLI session stays reachable at number 1.
+    assert via_command[0] == "cli-session"
+    assert via_command[1:] == [f"d-{i:03d}" for i in range(199, 189, -1)]
     db.close()
 
     assert _resolve_cli(monkeypatch, tmp_path) == "cli-session"

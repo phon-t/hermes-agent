@@ -21,6 +21,14 @@ UI_TRANSPORT_SOURCES = frozenset({"tui", "desktop"})
 ONESHOT_SOURCE = "oneshot"
 CLI_FAMILY_SOURCES = frozenset({"cli", ONESHOT_SOURCE})
 
+# Stored ``source`` labels a human's own chat can carry on another local surface: the TUI/Desktop
+# labels (``gui`` is the stored label for ``desktop``) and ``local`` (rows relabelled by peer
+# refresh, #143052). Bare ``hermes -c`` / ``--resume latest`` falls back to the most recent of
+# these when this interface has no history yet (#151584); automation labels (cron, tool, subagent,
+# kanban, platform chats) never win the MRU, and the reader restricts a ``local`` row to the
+# family's ``created_source``, so a platform chat relabelled ``local`` cannot steal the continue.
+OTHER_LOCAL_SOURCES = frozenset({"tui", "gui", "desktop", "local"})
+
 # The owner's own local surfaces: the only sources that carry OpenAI Daybreak (agent.daybreak). It is the
 # approved account's own access (no third-party or downstream use); a plugin session tagged ``telegram`` is
 # someone else's chat even when a local backend builds its agent.

@@ -1238,10 +1238,14 @@ def _session_db():
 
 
 def _latest_session_id(use_tui: bool) -> Optional[str]:
-    """MRU session for the active interface; a TUI launch falls back to the CLI MRU."""
+    """MRU session for the active interface; a TUI launch falls back to the CLI MRU, and either
+    falls back to the owner's latest chat on another local surface (Desktop/TUI) when this
+    interface has no history yet (#151584)."""
     last_id = _resolve_last_session(source="tui" if use_tui else "cli")
     if not last_id and use_tui:
         last_id = _resolve_last_session(source="cli")
+    if not last_id:
+        last_id = _resolve_last_session(source="other")
     return last_id
 
 
@@ -1252,11 +1256,16 @@ def _resolve_last_session(source: str = "cli") -> Optional[str]:
     ``hermes -c`` from repo A continues repo A's last session rather than the
     global MRU. Falls back to the unscoped MRU when no session matches the
     current workspace, preserving the old behaviour for fresh directories.
+    ``"other"`` is every other local surface (Desktop ``gui``, TUI, ``local`` rows they created):
+    the bare ``-c`` fallback when this interface has no history yet (#151584).
     """
     # A finite `hermes -z`/`chat -q` run is CLI history too: `hermes -z … --resume latest` chains on it.
     if source == "cli":
         from agent.session_source import CLI_FAMILY_SOURCES
         source = sorted(CLI_FAMILY_SOURCES)
+    elif source == "other":
+        from agent.session_source import OTHER_LOCAL_SOURCES
+        source = sorted(OTHER_LOCAL_SOURCES)
     with _session_db() as db:
         ws_key = _resolve_workspace_key()
         if ws_key:

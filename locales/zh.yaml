@@ -2564,6 +2564,7 @@ cli:
     label_context: "上下文"
     recent_intro: "(._.) 当前聊天还没有消息 — 以下是可以恢复的最近会话："
     recent_header: "最近的会话："
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "标题"
     column_preview: "预览"
     column_last_active: "最近活动"

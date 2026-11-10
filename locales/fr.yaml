@@ -2842,6 +2842,7 @@ cli:
     label_context: "Contexte"
     recent_intro: "(._.) Aucun message dans la conversation actuelle — voici les sessions récentes que vous pouvez reprendre :"
     recent_header: "Sessions récentes :"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "Titre"
     column_preview: "Aperçu"
     column_last_active: "Dernière activité"

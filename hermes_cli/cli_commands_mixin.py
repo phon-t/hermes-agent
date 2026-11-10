@@ -805,7 +805,9 @@ class CLICommandsMixin(CLICommandsSessionToolsMixin):
         # Users copy the help text's placeholder brackets/quotes verbatim (``/resume <abc123>``).
         if len(target) >= 2 and target[0] + target[-1] in {"<>", "[]", '""', "''"}:
             target = target[1:-1].strip()
-        if not target:
+        if not target or target.lower() == "all":
+            # Bare `/resume` already lists every surface (CLI rows, then other surfaces, #151584);
+            # `/resume all` is the same view, spelled out like the gateway's `/sessions all`.
             _cp(f"  {_t('resume.usage')}")
             if self._show_recent_sessions(reason="resume"):
                 # Arm a one-shot bare-number selection; must be the same list the table showed

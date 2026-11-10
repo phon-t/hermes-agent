@@ -2564,6 +2564,7 @@ cli:
     label_context: "コンテキスト"
     recent_intro: "(._.) 現在のチャットにはまだメッセージがありません — 再開できる最近のセッションはこちらです:"
     recent_header: "最近のセッション:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "タイトル"
     column_preview: "プレビュー"
     column_last_active: "最終アクティブ"

@@ -2564,6 +2564,7 @@ cli:
     label_context: "컨텍스트"
     recent_intro: "(._.) 현재 채팅에 아직 메시지가 없어요 — 재개할 수 있는 최근 세션이에요:"
     recent_header: "최근 세션:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "제목"
     column_preview: "미리보기"
     column_last_active: "마지막 활동"

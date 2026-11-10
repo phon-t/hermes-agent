@@ -2564,6 +2564,7 @@ cli:
     label_context: "Comhthéacs"
     recent_intro: "(._.) Níl aon teachtaireacht sa chomhrá reatha fós — seo seisiúin le déanaí ar féidir leat iad a atosú:"
     recent_header: "Seisiúin le déanaí:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "Teideal"
     column_preview: "Réamhamharc"
     column_last_active: "Gníomhach Go Deireanach"

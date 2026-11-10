@@ -2564,6 +2564,7 @@ cli:
     label_context: "السياق"
     recent_intro: "(._.) لا توجد رسائل في الدردشة الحالية بعد — إليك الجلسات الأخيرة التي يمكنك استئنافها:"
     recent_header: "الجلسات الأخيرة:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "العنوان"
     column_preview: "المعاينة"
     column_last_active: "آخر نشاط"

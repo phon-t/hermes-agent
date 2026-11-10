@@ -2564,6 +2564,7 @@ cli:
     label_context: "Bağlam"
     recent_intro: "(._.) Geçerli sohbette henüz mesaj yok — sürdürebileceğiniz son oturumlar:"
     recent_header: "Son oturumlar:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "Başlık"
     column_preview: "Önizleme"
     column_last_active: "Son Etkinlik"

@@ -2564,6 +2564,7 @@ cli:
     label_context: "Kontext"
     recent_intro: "(._.) Noch keine Nachrichten im aktuellen Chat — hier sind kürzliche Sitzungen, die Sie fortsetzen können:"
     recent_header: "Kürzliche Sitzungen:"
+    recent_other_surfaces: "Other surfaces ({sources}):"
     column_title: "Titel"
     column_preview: "Vorschau"
     column_last_active: "Zuletzt aktiv"

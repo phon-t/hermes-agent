@@ -49,6 +49,45 @@ def publish_plugin(staged: Path, target: Path, old_metadata: dict, new_metadata:
     }))
 
 
+def _requirements_satisfied(specs: tuple[str, ...]) -> bool:
+    """True when every spec is already met by the running interpreter's environment.
+
+    The dependency gate exists to authorise NEW packages entering the shared
+    environment. A requirement the venv already satisfies installs nothing, so
+    there is no consent question to ask (#152202). Conservative by design:
+    anything unparseable, unresolvable or versioned beyond what is installed
+    answers False and keeps the existing prompt/refusal path — including
+    extras, which may pull packages of their own, and direct URL requirements.
+    A marker that does not apply on this interpreter is satisfied: uv would not
+    install that requirement here either.
+    """
+    import importlib.metadata
+
+    from packaging.requirements import InvalidRequirement, Requirement
+
+    for spec in specs:
+        try:
+            requirement = Requirement(spec)
+        except InvalidRequirement:
+            return False
+        if requirement.url is not None or requirement.extras:
+            return False
+        if requirement.marker is not None:
+            try:
+                applies = requirement.marker.evaluate()
+            except Exception:
+                return False
+            if not applies:
+                continue
+        try:
+            installed = importlib.metadata.version(requirement.name)
+        except importlib.metadata.PackageNotFoundError:
+            return False
+        if requirement.specifier and not requirement.specifier.contains(installed):
+            return False
+    return True
+
+
 def _refresh_declared_dependencies(target: Path, staged: Path, manifest: dict, *, interactive: bool) -> None:
     """Dependency changes carried by an update clear the same gates as an install.
 
@@ -77,6 +116,13 @@ def _refresh_declared_dependencies(target: Path, staged: Path, manifest: dict, *
     before, after = read_python_declaration(target), read_python_declaration(staged)
     added = tuple(spec for spec in after.install_requirements if spec not in before.install_requirements)
     if not added and not (after.installs_packages and not before.installs_packages):
+        return
+    if added and _requirements_satisfied(added):
+        # Nothing new would enter the shared environment: the added requirements
+        # are already installed in this venv, so there is no consent question to
+        # ask — including over SSH without a TTY (#152202). The installs_packages-
+        # only case stays gated: a newly joining pyproject member would still add
+        # a package of its own.
         return
     if not interactive:
         raise pc.PluginOperationError(

@@ -256,3 +256,118 @@ def test_successful_update_publishes_matching_code_and_durable_workspace(install
                      if row.name == "transactional")
         assert check.klass == "catalog" and check.update_available is True
         assert check.current == record["revision"] and check.latest == state["sha"]
+
+
+def _declared_plugin_dir(parent: Path, name: str, dependencies: list[str], *, build_system: bool = False) -> Path:
+    """A minimal enabled plugin dir whose pyproject declares *dependencies*."""
+    from hermes_cli.plugins_manifest import SUPPORTED_MANIFEST_VERSION
+
+    plugin = parent / name
+    plugin.mkdir(parents=True, exist_ok=True)
+    (plugin / "plugin.yaml").write_text(
+        f"name: {name}\nversion: 1.0.0\nmanifest_version: {SUPPORTED_MANIFEST_VERSION}\n",
+        encoding="utf-8")
+    (plugin / "__init__.py").write_text("def register(ctx):\n    pass\n", encoding="utf-8")
+    build = ('[build-system]\nrequires=["setuptools"]\nbuild-backend="setuptools.build_meta"\n'
+             if build_system else "")
+    (plugin / "pyproject.toml").write_text(
+        f'[project]\nname="{name}"\nversion="1.0.0"\nrequires-python=">=3.14"\n'
+        f"dependencies={json.dumps(dependencies)}\n{build}",
+        encoding="utf-8")
+    return plugin
+
+
+@pytest.fixture
+def refresh_env(tmp_path, monkeypatch):
+    """Target/staged pair for :func:`_refresh_declared_dependencies` with the target enabled."""
+    from hermes_cli import plugins_cmd
+    from pm import workspace
+
+    target = _declared_plugin_dir(tmp_path, "target-plugin", [])
+    staged = _declared_plugin_dir(tmp_path, "staged-plugin", [])
+    monkeypatch.setattr(workspace, "enabled_plugin_dirs", lambda **kwargs: [target.resolve()])
+    calls: list = []
+
+    def _no_consent(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("consent must not be asked when the gate is skipped")
+
+    monkeypatch.setattr(plugins_cmd, "_consent_python_deps", _no_consent)
+    return target, staged, calls
+
+
+def test_update_skips_dependency_consent_when_added_deps_already_satisfied(refresh_env, monkeypatch):
+    """Regression for #152202: over SSH without a TTY, an update whose new pin only adds
+    dependencies the agent venv already satisfies must proceed — no consent question exists
+    to ask, because nothing new would enter the shared environment."""
+    from hermes_cli.plugins_transaction import _refresh_declared_dependencies
+
+    target, staged, _calls = refresh_env
+    # `packaging` is installed in the interpreter running this test; the staged
+    # pin adds it as a new requirement and nothing else changes.
+    _declared_plugin_dir(staged.parent, "staged-plugin", ["packaging"])
+    _refresh_declared_dependencies(target, staged, {"name": "target-plugin"}, interactive=False)
+
+
+def test_update_still_refuses_unsatisfied_deps_without_a_terminal(refresh_env):
+    """The skip is narrow: a new dependency the venv does NOT have still refuses
+    non-interactively instead of installing it on the user's behalf."""
+    from hermes_cli import plugins_cmd
+    from hermes_cli.plugins_transaction import _refresh_declared_dependencies
+
+    target, staged, _calls = refresh_env
+    _declared_plugin_dir(staged.parent, "staged-plugin", ["impossible-plugin-dep==1"])
+    with pytest.raises(plugins_cmd.PluginOperationError, match="impossible-plugin-dep"):
+        _refresh_declared_dependencies(target, staged, {"name": "target-plugin"}, interactive=False)
+
+
+def test_update_still_asks_for_unsatisfied_deps_interactively(refresh_env, monkeypatch):
+    """With a terminal, an unsatisfied new dependency still goes through the prompt —
+    the skip only fires when there is nothing to install."""
+    from hermes_cli import plugins_cmd
+    from hermes_cli.plugins_transaction import _refresh_declared_dependencies
+
+    target, staged, calls = refresh_env
+    _declared_plugin_dir(staged.parent, "staged-plugin", ["impossible-plugin-dep==1"])
+
+    def _decline(*args, **kwargs):
+        calls.append(args)
+        return False, "dependency install declined"
+
+    monkeypatch.setattr(plugins_cmd, "_consent_python_deps", _decline)
+    with pytest.raises(plugins_cmd.PluginOperationError, match="declined"):
+        _refresh_declared_dependencies(target, staged, {"name": "target-plugin"}, interactive=True)
+    assert calls, "the consent prompt was never shown for an unsatisfied dependency"
+
+
+def test_update_still_gates_a_new_pyproject_member_without_added_specs(refresh_env):
+    """A new pin that joins the workspace as a package member (build-system, no new
+    requirement strings) still needs consent: the member itself is a new package."""
+    from hermes_cli import plugins_cmd
+    from hermes_cli.plugins_transaction import _refresh_declared_dependencies
+
+    target, staged, _calls = refresh_env
+    _declared_plugin_dir(staged.parent, "staged-plugin", [], build_system=True)
+    with pytest.raises(plugins_cmd.PluginOperationError, match="pyproject.toml"):
+        _refresh_declared_dependencies(target, staged, {"name": "target-plugin"}, interactive=False)
+
+
+def test_requirements_satisfied_is_conservative():
+    """The satisfaction check answers from the running venv and fails closed on
+    anything it cannot prove: missing dists, wrong versions, extras, URLs and
+    unparseable specs all keep the consent gate."""
+    import importlib.metadata
+
+    from hermes_cli.plugins_transaction import _requirements_satisfied
+
+    installed = importlib.metadata.version("packaging")
+    assert _requirements_satisfied(("packaging",))
+    assert _requirements_satisfied((f"packaging=={installed}",))
+    assert _requirements_satisfied((f"packaging>={installed}",))
+    assert _requirements_satisfied(("packaging; sys_platform == 'nonexistent-platform-xyz'",))
+    assert not _requirements_satisfied(("impossible-plugin-dep==1",))
+    assert not _requirements_satisfied(("packaging==0.0.1",))
+    assert not _requirements_satisfied(("packaging[security]",))
+    assert not _requirements_satisfied(("packaging @ https://example.invalid/packaging.tar.gz",))
+    assert not _requirements_satisfied(("not a requirement !!!",))
+    assert not _requirements_satisfied((f"packaging=={installed}", "impossible-plugin-dep==1"))

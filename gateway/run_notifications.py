@@ -79,6 +79,36 @@ def _refusal_retry_at(step: int) -> float:
         step, base_delay=_WATCH_INJECTION_RETRY_BASE_DELAY,
         max_delay=_COMPLETION_INJECTION_RETRY_MAX_DELAY, jitter_ratio=0.0)
 
+
+def _invalid_process_event_platform(evt: dict) -> Optional[str]:
+    """Platform name an event names that no registered platform can serve, else ``None``.
+
+    Mirrors the validity check in ``_build_process_event_source``: the name comes from the
+    event itself or is derived from its session key. An unregistered platform never starts
+    resolving on retry, so delivery treats it as terminal (#152734) instead of requeueing
+    forever. A missing platform is NOT invalid — the unresolvable/raw-API routes handle it.
+    """
+    from gateway.run import _parse_session_key
+    platform_name = str(evt.get("platform") or "").strip().lower()
+    if not platform_name:
+        derived = _parse_session_key(str(evt.get("session_key") or "")) or {}
+        platform_name = str(derived.get("platform") or "").strip().lower()
+    if not platform_name:
+        return None
+    try:
+        platform = Platform(platform_name)
+    except Exception:
+        return platform_name
+    if platform.value in _BUILTIN_PLATFORM_VALUES:
+        return None
+    try:
+        from gateway.platform_registry import platform_registry
+        if platform_registry.is_registered(platform.value):
+            return None
+    except Exception:
+        return platform_name
+    return platform_name
+
 # Durable async-delegation claim transitions: kind -> (tools.async_delegation function, failure log).
 _DURABLE_CLAIM_OPS = {
     "drop": ("drop_completion_delivery", "Could not drop durable completion claim"),
@@ -723,7 +753,16 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 except Exception:
                     raise ValueError(platform_name)
         except Exception:
-            logger.warning("Synthetic process event has invalid platform metadata: %r", platform_name)
+            # Once per platform per gateway process: an unregistered platform is retried
+            # indefinitely by the async-delegation watcher, and one line per attempt filled
+            # gateway.log at ~10k lines/hour (#152734). The delivery paths drop the event
+            # terminally; this dedupe keeps the remaining callers quiet too.
+            warned = self.__dict__.setdefault("_invalid_platform_warned", set())
+            if platform_name in warned:
+                logger.debug("Synthetic process event has invalid platform metadata: %r", platform_name)
+            else:
+                warned.add(platform_name)
+                logger.warning("Synthetic process event has invalid platform metadata: %r", platform_name)
             return None
 
         def _opt(field: str) -> Optional[str]:
@@ -1193,6 +1232,32 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
                 return False
         return True
 
+    async def _drop_invalid_platform_completion(self, evt: dict) -> bool:
+        """Terminally drop an async completion naming an unregistered platform (#152734).
+
+        True when the event is gone for good (durable row dropped, legacy event with no row,
+        or interim notice with no row to drop); False when another consumer holds the row, so
+        the caller must leave it retryable instead of dropping someone else's claim.
+        """
+        if evt.get("type") != "async_delegation" or evt.get("task_failure_notice"):
+            return True
+        delegation_id = str(evt.get("delegation_id") or "")
+        if not delegation_id:
+            return True
+        try:
+            from tools.async_delegation import claim_completion_delivery, get_durable_delegation
+            row = get_durable_delegation(delegation_id)
+            if row is not None and row.get("delivery_state") != "pending":
+                return True  # already terminal (e.g. a duplicate queue copy after the drop)
+            claim_id = f"gateway:{id(self)}:{__import__('uuid').uuid4().hex}"
+            if not claim_completion_delivery(delegation_id, claim_id):
+                return False
+            self._settle_durable_claim("drop", delegation_id, claim_id)
+        except Exception as exc:
+            logger.debug("Could not drop unroutable async completion %s: %s", delegation_id, exc)
+            return False
+        return True
+
     async def _preflight_completion_delivery(self, evt: dict) -> _CompletionClaim:
         """Claim the durable row (async delegations) and verify the target before adapter acceptance.
 
@@ -1202,6 +1267,20 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         """
         claim = self._CompletionClaim()
         evt_type = evt.get("type")
+        if evt_type == "async_delegation":
+            invalid_platform = _invalid_process_event_platform(evt)
+            if invalid_platform is not None:
+                # Terminal: no adapter will ever serve this platform, so the pre-flight's
+                # "not ready" (False) would requeue the event on every 2 s watcher tick
+                # forever. Drop the durable row and return None so no caller requeues it.
+                logger.warning(
+                    "Async delegation %s targets unregistered platform %r; dropping delivery "
+                    "(result remains in the delegation records).",
+                    evt.get("delegation_id") or "<legacy>", invalid_platform,
+                )
+                dropped = await self._drop_invalid_platform_completion(evt)
+                claim.proceed, claim.early_result = False, None if dropped else False
+                return claim
         if evt_type == "async_delegation" and not await self._completion_delivery_ready(evt):
             claim.proceed, claim.early_result = False, False
             return claim
@@ -1571,6 +1650,13 @@ class GatewayNotificationsMixin(GatewayUpdateNotificationsMixin, GatewayNotifica
         for evt in group:
             synth_text = _format_gateway_process_notification(evt)
             if not synth_text:
+                continue
+            if _invalid_process_event_platform(evt) is not None:
+                # Terminal, before the group's all-or-nothing ready check: an unroutable
+                # sibling must not hold the whole group in the retry loop (#152734).
+                # The pre-flight drops its durable row; a False return there only means
+                # another consumer holds it, and this group's copy is still spent.
+                await self._deliver_completion_notification(synth_text, evt)
                 continue
             if getattr(self, 'session_authority', None) is not None:
                 from gateway.session_automation import completion_admission

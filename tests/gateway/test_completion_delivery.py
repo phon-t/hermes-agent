@@ -8,6 +8,7 @@ state (when available) is acknowledged through its authoritative SQLite API.
 
 import asyncio
 import json
+import logging
 import queue
 from collections import OrderedDict
 from types import SimpleNamespace
@@ -1003,3 +1004,84 @@ def test_watch_drain_retries_transport_failure(monkeypatch, isolated_registry):
     asyncio.run(runner._async_delegation_watcher(interval=0))
     assert adapter.handle_message.await_count == 2
     assert isolated_registry.completion_queue.empty()
+
+def _unregistered_platform_event(delegation_id="deleg_unregistered_platform"):
+    """Async completion from a session on a platform no gateway adapter serves (#152734)."""
+    event = _async_event(delegation_id)
+    event["session_key"] = "agent:main:my-custom-platform:dm:12345:678"
+    return event
+
+
+def test_unregistered_platform_async_completion_drops_terminally(monkeypatch, isolated_registry, caplog):
+    """An unregistered platform is terminal: the group returns None (never False), the durable
+    row is dropped, and the invalid-platform warning is logged once no matter how often the
+    event is re-offered — before the fix the pre-flight's "not ready" requeued it on every
+    2 s watcher tick forever, logging the warning each time."""
+    from tools import async_delegation
+
+    event = _unregistered_platform_event()
+    _persist_pending_completion(event)
+    adapter = SimpleNamespace(handle_message=AdmittingHandler())
+    runner = _runner(adapter)
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        assert asyncio.run(runner._deliver_async_delegation_group([event])) is None
+        # A duplicate queue copy after the drop is terminal too, not a requeue trigger.
+        assert asyncio.run(runner._deliver_async_delegation_group([dict(event)])) is None
+    row = async_delegation.get_durable_delegation(event["delegation_id"])
+    assert row["delivery_state"] == "dropped"
+    adapter.handle_message.assert_not_awaited()
+    invalid_warnings = [r for r in caplog.records if "invalid platform metadata" in r.getMessage()]
+    assert len(invalid_warnings) == 1
+
+
+def test_unregistered_platform_async_completion_not_requeued_by_watcher(monkeypatch, isolated_registry):
+    """The watcher consumes the unroutable event instead of requeueing it: after two ticks the
+    queue is empty and the durable row is dropped, so the 2 s loop cannot spin forever."""
+    from tools import async_delegation
+
+    event = _unregistered_platform_event("deleg_unregistered_watcher")
+    _persist_pending_completion(event)
+    isolated_registry.completion_queue.put(dict(event))
+    adapter = SimpleNamespace(handle_message=AdmittingHandler())
+    runner = _runner(adapter)
+    _stop_after_sleeps(monkeypatch, runner, count=2)
+    asyncio.run(runner._async_delegation_watcher(interval=0))
+    assert isolated_registry.completion_queue.empty()
+    row = async_delegation.get_durable_delegation(event["delegation_id"])
+    assert row["delivery_state"] == "dropped"
+    adapter.handle_message.assert_not_awaited()
+
+
+def test_build_process_event_source_invalid_platform_warns_once(monkeypatch, isolated_registry, caplog):
+    """Repeated source builds for one unregistered platform warn once; later builds stay debug."""
+    adapter = SimpleNamespace(handle_message=AdmittingHandler())
+    runner = _runner(adapter)
+    evt = {
+        "session_key": "agent:main:my-custom-platform:dm:12345:678",
+        "platform": "my-custom-platform",
+        "chat_type": "dm",
+        "chat_id": "12345",
+    }
+    with caplog.at_level(logging.WARNING, logger="gateway.run"):
+        assert runner._build_process_event_source(evt) is None
+        assert runner._build_process_event_source(evt) is None
+        assert runner._build_process_event_source(evt) is None
+    invalid_warnings = [r for r in caplog.records if "invalid platform metadata" in r.getMessage()]
+    assert len(invalid_warnings) == 1
+
+
+def test_unregistered_platform_event_does_not_block_valid_sibling(monkeypatch, isolated_registry):
+    """In a mixed group the unroutable event is dropped and the valid sibling still delivers:
+    the group's all-or-nothing ready check must not let one bad platform hold the batch."""
+    from tools import async_delegation
+
+    bad = _unregistered_platform_event("deleg_unregistered_sibling")
+    good = _async_event("deleg_valid_sibling")
+    _persist_pending_completion(bad)
+    _persist_pending_completion(good)
+    adapter = SimpleNamespace(handle_message=AdmittingHandler())
+    runner = _runner(adapter)
+    assert asyncio.run(runner._deliver_async_delegation_group([bad, good])) is True
+    assert async_delegation.get_durable_delegation(bad["delegation_id"])["delivery_state"] == "dropped"
+    assert async_delegation.get_durable_delegation(good["delegation_id"])["delivery_state"] == "delivered"
+    adapter.handle_message.assert_awaited_once()

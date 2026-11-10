@@ -191,8 +191,11 @@ def kanban_command(args: argparse.Namespace) -> int:
         handler = _HANDLERS.get(action)
         if not handler:
             return _err(f"kanban: unknown action {action!r}", 2)
+        own_task = _worker_own_card_task(args)
+        scope = kb.scoped_worker_own_card_mutation(own_task) if own_task else contextlib.nullcontext()
         try:
-            return int(handler(args) or 0)
+            with scope:
+                return int(handler(args) or 0)
         except (ValueError, RuntimeError, PermissionError) as exc:
             return _err(f"kanban: {exc}")
 
@@ -219,6 +222,77 @@ _DELEGATED_CHILD_DENIED_BOARD_ACTIONS: frozenset[str] = frozenset({
     "set-default-workdir", "import",
 })
 
+# Worker lifecycle verbs a dispatched worker may run via the CLI on its OWN bound
+# card only (#152639): the dispatcher already granted that lineage scope over
+# exactly that one task, and the in-process kanban_* tools already let the same
+# worker do the same work on the same card. ``unblock`` is deliberately absent:
+# it is orchestrator-only by design in both the tool gate (``kanban_unblock`` is
+# in ``_ORCHESTRATOR_TOOLS``) and this CLI (``_cmd_unblock`` refuses workers) —
+# a worker never unblocks, not even its own card. ``create``, ``link``,
+# ``dispatch``, ``daemon`` and board actions stay refused exactly as today.
+_WORKER_OWN_CARD_ACTIONS: frozenset[str] = frozenset({
+    "claim", "heartbeat", "comment", "attach", "attach-rm", "complete", "block",
+    "edit", "request-review", "request-changes", "reopen-review",
+})
+
+
+def _named_task_ids(args: argparse.Namespace) -> list[str]:
+    """Every task id this invocation names (``task_id`` / ``task_ids`` / ``--ids``)."""
+    ids: list[str] = []
+    task_id = getattr(args, "task_id", None)
+    if isinstance(task_id, str) and task_id.strip():
+        ids.append(task_id.strip())
+    for attr in ("task_ids", "ids"):
+        for value in getattr(args, attr, None) or []:
+            if isinstance(value, str) and value.strip():
+                ids.append(value.strip())
+    return ids
+
+
+def _attachment_owner_task(args: argparse.Namespace) -> Optional[str]:
+    """The task an ``attach-rm`` invocation names, via its attachment row; None when
+    unresolvable. Read-only against the pinned board DB (a fenced worker resolves
+    through its ``HERMES_KANBAN_DB`` pin, never ``--board``); any failure refuses
+    closed — the caller treats None as "not the worker's own card"."""
+    attachment_id = getattr(args, "attachment_id", None)
+    if not isinstance(attachment_id, int) or isinstance(attachment_id, bool):
+        return None
+    try:
+        import sqlite3
+        from urllib.parse import quote
+        db_path = kb.kanban_db_path()
+        if not db_path.is_file():
+            return None
+        conn = sqlite3.connect(f"file:{quote(str(db_path))}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT task_id FROM task_attachments WHERE id = ?", (attachment_id,)).fetchone()
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    return row[0] if row else None
+
+
+def _worker_own_card_task(args: argparse.Namespace) -> Optional[str]:
+    """The own task id when this invocation is a dispatched worker's CLI verb on its
+    own bound card only, else None. The fast-fail consults it; ``kanban_command``
+    enters the matching durable scope around the handler. ``attach-rm`` names an
+    attachment, not a task, so its owner is resolved from the board first."""
+    action = getattr(args, "kanban_action", None)
+    if action not in _WORKER_OWN_CARD_ACTIONS:
+        return None
+    from agent.delegation_context import fenced_own_task
+    own = fenced_own_task()
+    if not own:
+        return None
+    if action == "attach-rm":
+        return own if _attachment_owner_task(args) == own else None
+    ids = _named_task_ids(args)
+    if not ids or any(tid != own for tid in ids):
+        return None
+    return own
+
 
 def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
     action = getattr(args, "kanban_action", None)
@@ -226,6 +300,8 @@ def _is_delegated_child_cli_mutation(args: argparse.Namespace) -> bool:
         if (getattr(args, "boards_action", None) or "list") not in _DELEGATED_CHILD_DENIED_BOARD_ACTIONS:
             return False
     elif action not in _DELEGATED_CHILD_DENIED_ACTIONS:
+        return False
+    if _worker_own_card_task(args) is not None:
         return False
     from agent.delegation_context import kanban_path_is_fenced
 

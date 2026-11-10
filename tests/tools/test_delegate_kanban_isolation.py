@@ -348,3 +348,228 @@ def test_child_attempting_default_complete_does_not_finish_parent_or_delete_work
     assert task.status == "running"
     assert run.status == "running"
     assert workspace.is_dir()
+
+
+# ---------------------------------------------------------------------------
+# Dispatched-worker own-card CLI scope (#152639)
+# ---------------------------------------------------------------------------
+
+
+def _board_with_tasks(monkeypatch, tmp_path):
+    """A temp board with two ready tasks; returns ``(home, own, other)``."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_PROFILE", "worker")
+    monkeypatch.setenv("HERMES_KANBAN_ATTACHMENTS_ROOT", str(tmp_path / "attachments"))
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    kb._INITIALIZED_PATHS.clear()
+    kb.init_db()
+    conn = kbc.connect()
+    try:
+        own = kb.create_task(conn, title="own card")
+        other = kb.create_task(conn, title="sibling card")
+    finally:
+        conn.close()
+    return home, own, other
+
+
+def _apply_worker_tool_env(monkeypatch, home, tid):
+    """The env a dispatched worker's tool subprocess sees: the real scrub of the
+    worker's own env (TASK set, no marker) -> compound marker, TASK stripped."""
+    from agent.delegation_context import scrub_kanban_env
+
+    scrubbed = scrub_kanban_env({
+        "HERMES_KANBAN_TASK": tid,
+        "HERMES_KANBAN_RUN_ID": "7",
+        "HERMES_KANBAN_DB": str(home / "kanban.db"),
+    })
+    assert scrubbed["HERMES_DELEGATED_CHILD_CONTEXT"] == f"{home}::own={tid}"
+    assert "HERMES_KANBAN_TASK" not in scrubbed
+    monkeypatch.setenv(
+        "HERMES_DELEGATED_CHILD_CONTEXT", scrubbed["HERMES_DELEGATED_CHILD_CONTEXT"])
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID", raising=False)
+    return scrubbed
+
+
+def _kanban_args(*argv):
+    """argparse namespace for ``hermes kanban <argv...>``."""
+    import argparse
+
+    from hermes_cli import kanban
+
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="cmd")
+    kanban.build_parser(sub)
+    return parser.parse_args(["kanban", *argv])
+
+
+def test_worker_branch_scrub_stamps_own_task_scope(monkeypatch, tmp_path):
+    """A dispatched worker's own subprocess env carries ``<root>::own=<task>``;
+    the compound marker fences exactly like the bare root."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+
+    from agent.delegation_context import (
+        fenced_own_task, kanban_path_is_fenced, scrub_kanban_env)
+
+    scrubbed = scrub_kanban_env({"HERMES_KANBAN_TASK": "t_own", "HERMES_KANBAN_DB": str(home / "kanban.db")})
+    assert scrubbed["HERMES_DELEGATED_CHILD_CONTEXT"] == f"{home}::own=t_own"
+    assert "HERMES_KANBAN_TASK" not in scrubbed
+
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT",
+                       scrubbed["HERMES_DELEGATED_CHILD_CONTEXT"])
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+    assert fenced_own_task() == "t_own"
+    assert kanban_path_is_fenced(home / "kanban.db") is True
+    assert kanban_path_is_fenced(tmp_path / "elsewhere" / "kanban.db") is False
+
+
+def test_scrub_keeps_bare_root_for_delegate_child_lineage(monkeypatch, tmp_path):
+    """Delegate-child lineages never gain an ``own=`` scope: the ContextVar stamp,
+    an inherited marker (compound included) and the legacy ``"1"`` all stay bare."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.delenv("HERMES_DELEGATED_CHILD_CONTEXT", raising=False)
+
+    from agent.delegation_context import delegated_child_context, fenced_own_task, scrub_kanban_env
+
+    worker_env = {"HERMES_KANBAN_TASK": "t_parent"}
+    with delegated_child_context():
+        stamped = scrub_kanban_env(worker_env)
+    assert stamped["HERMES_DELEGATED_CHILD_CONTEXT"] == str(home)
+    assert "::own=" not in stamped["HERMES_DELEGATED_CHILD_CONTEXT"]
+
+    inherited = scrub_kanban_env({**worker_env,
+                                  "HERMES_DELEGATED_CHILD_CONTEXT": f"{home}::own=t_parent"})
+    assert inherited["HERMES_DELEGATED_CHILD_CONTEXT"] == f"{home}::own=t_parent"
+
+    legacy = scrub_kanban_env({**worker_env, "HERMES_DELEGATED_CHILD_CONTEXT": "1"})
+    assert legacy["HERMES_DELEGATED_CHILD_CONTEXT"] == str(home)
+
+    monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", "1")
+    assert fenced_own_task() == ""
+
+
+def test_dispatched_worker_cli_mutates_own_card_only(monkeypatch, tmp_path, capsys):
+    """The reported defect: a dispatched worker's CLI verbs on its own bound card
+    were refused by the delegate-child fence. Own-card verbs pass; a sibling
+    card and a non-own verb stay refused."""
+    from hermes_cli import kanban, kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    home, own, other = _board_with_tasks(monkeypatch, tmp_path)
+    _apply_worker_tool_env(monkeypatch, home, own)
+
+    assert kanban.kanban_command(_kanban_args("claim", own)) == 0
+    assert kanban.kanban_command(_kanban_args("heartbeat", own)) == 0
+    assert kanban.kanban_command(_kanban_args("comment", own, "still", "working")) == 0
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, own).status == "running"
+        assert len(kb.list_comments(conn, own)) == 1
+
+    assert kanban.kanban_command(_kanban_args("claim", other)) == 1
+    assert "delegate_task child contexts cannot mutate Kanban tasks" in capsys.readouterr().err
+    assert kanban.kanban_command(_kanban_args("schedule", other, "waiting")) == 1
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, other).status == "ready"
+
+
+def test_bare_marker_and_legacy_one_marker_refuse_own_card(monkeypatch, tmp_path, capsys):
+    """Non-scoped lineages still refuse, even for the worker's own card: a
+    bare-root marker and the legacy ``"1"`` marker carry no ``own=`` scope."""
+    from hermes_cli import kanban, kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    home, own, _other = _board_with_tasks(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+
+    for marker in (str(home), "1"):
+        monkeypatch.setenv("HERMES_DELEGATED_CHILD_CONTEXT", marker)
+        assert kanban.kanban_command(_kanban_args("claim", own)) == 1
+        assert "delegate_task child contexts cannot mutate Kanban tasks" in capsys.readouterr().err
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, own).status == "ready"
+
+
+def test_in_process_delegate_child_cli_still_refused(monkeypatch, tmp_path, capsys):
+    """An in-process delegate_task child (ContextVar) stays fenced even when the
+    worker env it shares names its own task."""
+    from agent.delegation_context import delegated_child_context
+    from hermes_cli import kanban, kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    home, own, _other = _board_with_tasks(monkeypatch, tmp_path)
+    monkeypatch.setenv("HERMES_KANBAN_TASK", own)
+    monkeypatch.setenv("HERMES_KANBAN_DB", str(home / "kanban.db"))
+
+    with delegated_child_context():
+        assert kanban.kanban_command(_kanban_args("claim", own)) == 1
+    assert "delegate_task child contexts cannot mutate Kanban tasks" in capsys.readouterr().err
+    with kbc.connect() as conn:
+        assert kb.get_task(conn, own).status == "ready"
+
+
+def test_write_txn_fence_needs_cli_scope(monkeypatch, tmp_path):
+    """The durable layer stays the trust boundary: a compound marker alone does
+    not open the fence for direct-import mutators — only the CLI-validated scope
+    does, and only for the scoped task."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    home, own, other = _board_with_tasks(monkeypatch, tmp_path)
+    _apply_worker_tool_env(monkeypatch, home, own)
+
+    conn = kbc.connect()
+    try:
+        with pytest.raises(PermissionError, match="delegate_task child contexts"):
+            kb.add_comment(conn, own, "worker", "direct import")
+    finally:
+        conn.close()
+    # Like the CLI handlers, the scoped write opens its connection inside the
+    # scope: a connection opened while fenced is read-only by design.
+    with kb.scoped_worker_own_card_mutation(own):
+        scoped = kbc.connect()
+        try:
+            kb.add_comment(scoped, own, "worker", "via scope")
+            with pytest.raises(PermissionError, match="delegate_task child contexts"):
+                with kb.scoped_worker_own_card_mutation(other):
+                    kb.add_comment(scoped, own, "worker", "wrong scope")
+            assert len(kb.list_comments(scoped, own)) == 1
+        finally:
+            scoped.close()
+
+
+def test_worker_cli_attach_rm_scoped_to_own_card(monkeypatch, tmp_path, capsys):
+    """``attach-rm`` names an attachment, not a task: it is allowed only when the
+    attachment belongs to the worker's own card."""
+    from hermes_cli import kanban, kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    home, own, other = _board_with_tasks(monkeypatch, tmp_path)
+    conn = kbc.connect()
+    try:
+        own_att = kb.store_attachment_bytes(conn, own, "own.txt", b"own")
+        other_att = kb.store_attachment_bytes(conn, other, "other.txt", b"other")
+    finally:
+        conn.close()
+    _apply_worker_tool_env(monkeypatch, home, own)
+
+    assert kanban.kanban_command(_kanban_args("attach-rm", str(other_att))) == 1
+    assert "delegate_task child contexts cannot mutate Kanban tasks" in capsys.readouterr().err
+    assert kanban.kanban_command(_kanban_args("attach-rm", str(own_att))) == 0
+    with kbc.connect() as conn:
+        assert kb.get_attachment(conn, own_att) is None
+        assert kb.get_attachment(conn, other_att) is not None

@@ -712,6 +712,19 @@ def _refuse_dead_board_resurrection(path: Path, board: Optional[str]) -> None:
         raise ValueError(f"kanban board {slug!r} does not exist; create it with `hermes kanban boards create {slug}`")
 
 
+def _own_card_scope_open() -> bool:
+    """True while a CLI-validated own-card scope is open for this process's fence
+    marker (#152639): the CLI entry already checked the invocation names only
+    the marker's ``own=`` task, so a connection opened under the scope may write.
+    Every other fenced process stays read-only. A scope can only be open inside
+    a CLI handler — ``kanban_command`` enters it after ``init_db`` already proved
+    the board initialized — so this never creates or migrates a board on a
+    descendant's behalf."""
+    scope = _kb._WORKER_OWN_CARD_SCOPE.get()
+    from agent.delegation_context import fenced_own_task
+    return bool(scope) and scope == fenced_own_task()
+
+
 def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> sqlite3.Connection:
     """Open (and initialize if needed) the kanban DB. WAL is (re)enabled on
     every connection so a re-created file stays robust; the first connection
@@ -720,8 +733,8 @@ def connect(db_path: Optional[Path] = None, *, board: Optional[str] = None) -> s
     :func:`kanban_db_path` (``HERMES_KANBAN_DB`` -> ``HERMES_KANBAN_BOARD`` ->
     ``<root>/kanban/current`` -> ``default``)."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
-    from agent.delegation_context import kanban_path_is_fenced
-    if kanban_path_is_fenced(path):
+    from agent.delegation_context import fenced_own_task, kanban_path_is_fenced
+    if kanban_path_is_fenced(path) and not _own_card_scope_open():
         # Reads must not enter schema/backfill write transactions. Never create a
         # missing board or migrate on a descendant's behalf; the owner initializes it.
         conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True)

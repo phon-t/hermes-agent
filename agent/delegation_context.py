@@ -119,6 +119,32 @@ def _fenced_kanban_root() -> str:
         return "1"
 
 
+_OWN_SCOPE_SEP = "::"
+_OWN_SCOPE_PREFIX = "own="
+
+
+def _split_fence_marker(marker: str) -> tuple[str, str]:
+    """``(root, own_task)`` of a fence marker. A compound marker stamps the dispatched
+    worker's bound task after the root (``<root>::own=<task-id>``); a plain root or the
+    legacy ``"1"`` carries no own-task scope."""
+    root, sep, scope = (marker or "").partition(_OWN_SCOPE_SEP)
+    if not sep or not scope.startswith(_OWN_SCOPE_PREFIX):
+        return marker, ""
+    return root, scope[len(_OWN_SCOPE_PREFIX):].strip()
+
+
+def fenced_own_task() -> str:
+    """The ``own=`` task scope of this process's fence marker, ``""`` when absent.
+
+    Only a dispatched worker's lineage carries one (see :func:`scrub_kanban_env`):
+    a bare-root marker, the legacy ``"1"`` marker and an in-process delegate child
+    (whose marker lives in the ContextVar, not ``os.environ``) all scope nothing."""
+    marker = os.environ.get(DELEGATED_CHILD_ENV_MARKER, "")
+    if not marker or marker == "1":
+        return ""
+    return _split_fence_marker(marker)[1]
+
+
 def scrub_kanban_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[str, str]:
     """Remove worker identity, retaining board/location and an inherited write fence.
 
@@ -131,13 +157,29 @@ def scrub_kanban_env(env: Mapping[str, str] | MutableMapping[str, str]) -> dict[
     against a temp ``HERMES_HOME`` got a silently read-only board there. An inherited
     path-valued marker is kept (a grandchild that moved HERMES_HOME must not re-fence
     onto its scratch root and unfence the real one).
+
+    A dispatched worker's own subprocesses get a compound marker (``<root>::own=<task>``):
+    the dispatcher already granted that lineage scope over exactly one task, and the
+    fence layers read the ``own=`` scope back to let the worker's CLI verbs reach its
+    own bound card (#152639). A delegate-child lineage keeps the bare-root semantics:
+    an inherited marker passes through as today, the legacy ``"1"`` stays bare, and
+    a stamp made while a delegate-child / non-dispatcher-owned context is active
+    never gains an ``own=`` scope.
     """
     cleaned = {k: v for k, v in env.items() if k not in KANBAN_ENV_KEYS}
     # Only the gateway mints ``kanban`` sessions: a descendant ``hermes chat`` sending it is refused.
     if cleaned.get("HERMES_SESSION_SOURCE") == "kanban":
         del cleaned["HERMES_SESSION_SOURCE"]
     inherited = str(env.get(DELEGATED_CHILD_ENV_MARKER) or "")
-    cleaned[DELEGATED_CHILD_ENV_MARKER] = inherited if inherited and inherited != "1" else _fenced_kanban_root()
+    if inherited and inherited != "1":
+        cleaned[DELEGATED_CHILD_ENV_MARKER] = inherited
+        return cleaned
+    root = _fenced_kanban_root()
+    task = ""
+    if not inherited and is_dispatcher_owned_worker_context():
+        task = (str(env.get("HERMES_KANBAN_TASK") or "")
+                or str(os.environ.get("HERMES_KANBAN_TASK") or "")).strip()
+    cleaned[DELEGATED_CHILD_ENV_MARKER] = f"{root}{_OWN_SCOPE_SEP}{_OWN_SCOPE_PREFIX}{task}" if task else root
     return cleaned
 
 
@@ -154,12 +196,15 @@ def kanban_path_is_fenced(path: os.PathLike[str] | str) -> bool:
     if marker == "1":
         return True
     from pathlib import Path
+    root, _own = _split_fence_marker(marker)
+    if not root:
+        return True  # malformed marker: fail closed, fence every board
     target = Path(path).expanduser().resolve()
     pinned = os.environ.get("HERMES_KANBAN_DB", "").strip()
     if pinned and target == Path(pinned).expanduser().resolve():
         return True
     try:
-        target.relative_to(Path(marker).expanduser().resolve())
+        target.relative_to(Path(root).expanduser().resolve())
     except ValueError:
         return False
     return True

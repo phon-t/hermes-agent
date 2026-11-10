@@ -136,6 +136,30 @@ _IS_WINDOWS = sys.platform == "win32"
 KANBAN_ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024  # one cap for dashboard, tools and CLI
 
 
+# The CLI-validated own-card scope a dispatched worker's mutation runs under
+# (#152639): the task id :func:`scoped_worker_own_card_mutation` opened, or None.
+# ``_assert_not_delegated_child_mutation`` permits a write only while the open
+# scope's id equals the ``own=`` scope of the process's fence marker, so a scope
+# opened for one task never relaxes the fence for another.
+_WORKER_OWN_CARD_SCOPE: ContextVar[str | None] = ContextVar(
+    "hermes_worker_own_card_scope", default=None)
+
+
+@contextlib.contextmanager
+def scoped_worker_own_card_mutation(task_id: str):
+    """Permit Kanban writes for one dispatched worker's own bound card only.
+
+    The CLI fast-fail (``hermes_cli.kanban._worker_own_card_task``) validates the
+    invocation against the fence marker's ``own=`` scope before opening this; the
+    durable fence re-checks the scope against the live marker on every write, so
+    direct-import mutators that skip the CLI entry stay denied closed."""
+    token = _WORKER_OWN_CARD_SCOPE.set(task_id)
+    try:
+        yield
+    finally:
+        _WORKER_OWN_CARD_SCOPE.reset(token)
+
+
 def _assert_not_delegated_child_mutation(path: str | Path | None = None) -> None:
     """Reject Kanban mutations from ``delegate_task`` child contexts.
 
@@ -144,10 +168,19 @@ def _assert_not_delegated_child_mutation(path: str | Path | None = None) -> None
     user and board-metadata mutator fails closed before touching durable state.
     *path* is the board DB / metadata root being mutated; ``None`` means the
     lineage's own board (``kanban_home()``).
+
+    One exception: a dispatched worker's CLI verb on its own bound card, which the
+    CLI entry validated against the fence marker's ``own=`` scope and wrapped in
+    :func:`scoped_worker_own_card_mutation` (#152639). The scope alone is not a
+    grant — it permits the write only while its id equals the marker's live
+    ``own=`` scope.
     """
-    from agent.delegation_context import kanban_path_is_fenced
+    from agent.delegation_context import fenced_own_task, kanban_path_is_fenced
 
     if kanban_path_is_fenced(kanban_home() if path is None else path):
+        scope = _WORKER_OWN_CARD_SCOPE.get()
+        if scope and scope == fenced_own_task():
+            return
         raise PermissionError("delegate_task child contexts cannot mutate Kanban tasks or boards")
 
 

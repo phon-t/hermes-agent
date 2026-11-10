@@ -229,6 +229,9 @@ class TestModelStateIncludesNamedProviders:
             if m.model_id == "custom:bedrock-mantle:openai.gpt-5.5"
         )
         assert "AWS Bedrock Mantle" in (named.description or "")
+        # User-defined rows use the same "<label> · <model>" format as built-ins (#152857):
+        # the provider label must be in the visible name, not only the description.
+        assert named.name == "AWS Bedrock Mantle · openai.gpt-5.5"
 
     @pytest.mark.asyncio
     async def test_configured_provider_inventory_row_uses_custom_choice_id(self):

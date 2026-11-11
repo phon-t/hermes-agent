@@ -331,6 +331,32 @@ _APPROVAL_LABEL_KEYS = {
     "once": "platform.teams.approval.resolved_once", "session": "platform.teams.approval.resolved_session",
     "always": "platform.teams.approval.resolved_always", "deny": "platform.teams.approval.resolved_deny",
 }
+# Agent-facing context for an attachment that never reached the gateway: without it the agent
+# answers that nothing was attached while the user can see their file (#151903). Plain English,
+# like gateway/run.py's _build_document_context_note — the agent relays it in the user's language.
+_ATTACHMENT_TOO_LARGE_NOTE = (
+    "[Attachment not received: '{name}' did not reach you because it is {size} MB, "
+    "over the {limit} MB limit for files sent in Teams.]")
+_ATTACHMENT_UNSUPPORTED_NOTE = (
+    "[Attachment not received: '{name}' has a file type Hermes cannot receive in Teams.]")
+_ATTACHMENT_FAILED_NOTE = "[Attachment not received: '{name}' could not be downloaded in Teams.]"
+# ``validate_inbound_media_size`` reports the cap as "(<size> bytes > <limit> bytes)".
+_TOO_LARGE_RE = re.compile(r"\((\d+) bytes > (\d+) bytes\)")
+
+
+def _whole_mb(size_bytes: int) -> str:
+    """Whole megabytes for the drop note (``1015872292`` → ``969``)."""
+    return f"{size_bytes / (1024 * 1024):.0f}"
+
+
+def _dropped_attachment_note(name: str, exc: Exception) -> str:
+    """The drop note for a failed cache: the size-cap note when the failure *is* the inbound
+    cap, else the generic download note."""
+    match = _TOO_LARGE_RE.search(str(exc))
+    if match:
+        return _ATTACHMENT_TOO_LARGE_NOTE.format(
+            name=name, size=_whole_mb(int(match.group(1))), limit=_whole_mb(int(match.group(2))))
+    return _ATTACHMENT_FAILED_NOTE.format(name=name)
 
 
 def _approval_body(cmd: str, desc: str, *, always: bool = False) -> list:
@@ -528,7 +554,11 @@ class TeamsAdapter(BasePlatformAdapter):
             user_name=getattr(from_account, "name", None) or "",
             guild_id=getattr(conv, "tenant_id", None) or self._tenant_id,
             message_id=msg_id)
-        media: list = [m for m in [await self._cache_attachment(a) for a in getattr(activity, "attachments", None) or []] if m]
+        cached = [await self._cache_attachment(a) for a in getattr(activity, "attachments", None) or []]
+        media: list = [m for m, _ in cached if m]
+        notes = [note for _, note in cached if note]
+        if notes:  # a dropped file still reaches the agent as a note, or it answers "no attachment" (#151903)
+            text = "\n".join([text, *notes]) if text else "\n".join(notes)
         media_kinds = [kind for _, _, kind in media]  # media items are (path, media_type, kind)
         msg_type = next((t for kind, t in _MEDIA_KIND_PRECEDENCE if kind in media_kinds), MessageType.TEXT)
         await self.handle_message(MessageEvent(
@@ -545,15 +575,18 @@ class TeamsAdapter(BasePlatformAdapter):
             return "<at>" in text
         return any(str(getattr(getattr(e, "mentioned", None), "id", "")) in bot_ids for e in mentions)
 
-    async def _cache_attachment(self, att: Any) -> Optional[tuple]:
-        """Download + cache one inbound attachment → ``(path, media_type, kind)`` or ``None``."""
+    async def _cache_attachment(self, att: Any) -> tuple[Optional[tuple], Optional[str]]:
+        """Download + cache one inbound attachment → ``((path, media_type, kind), None)`` on success,
+        ``(None, note)`` when a real file could not be cached (the note is appended to the event
+        text so the agent knows a file was sent), ``(None, None)`` for non-file payloads (the
+        text/html body mirror, cards) that carry no file at all."""
         content_url = getattr(att, "content_url", None)
         content_type = (getattr(att, "content_type", None) or "").lower()
         att_name = getattr(att, "name", None) or ""
         # Skip non-file payloads: Teams mirrors the message body as a text/html attachment,
         # and cards arrive as application/vnd.microsoft.card.*
         if (content_type in ("text/html", "text/plain") and not content_url) or content_type.startswith("application/vnd.microsoft.card"):
-            return None
+            return None, None
         if content_type == "application/vnd.microsoft.teams.file.download.info":
             # Consent-free download: content carries a pre-authed SharePoint downloadUrl + file type.
             content = getattr(att, "content", None)
@@ -562,18 +595,18 @@ class TeamsAdapter(BasePlatformAdapter):
             download_url = content.get("downloadUrl") or content.get("download_url")
             file_type = (content.get("fileType") or content.get("file_type") or "").lstrip(".")
             if not download_url:
-                return None
+                return None, _ATTACHMENT_FAILED_NOTE.format(name=att_name or "attachment")
             filename = att_name or (f"document.{file_type}" if file_type else "document")
             try:
                 data = await self._fetch_attachment_bytes(download_url)
                 cached = await cache_media_bytes_async(data, filename=filename, mime_type="")
                 if not cached:
                     logger.warning("[teams] Unsupported document type for attachment '%s', skipping", filename)
-                    return None
-                return cached.path, cached.media_type, cached.kind
+                    return None, _ATTACHMENT_UNSUPPORTED_NOTE.format(name=filename)
+                return (cached.path, cached.media_type, cached.kind), None
             except Exception as e:
                 logger.warning("[teams] Failed to cache file attachment '%s': %s", filename, e)
-            return None
+                return None, _dropped_attachment_note(filename, e)
         if content_url and content_type.startswith("image/"):
             try:
                 if _is_botframework_attachment_url(content_url):
@@ -585,21 +618,26 @@ class TeamsAdapter(BasePlatformAdapter):
                         logger.warning(
                             "[teams] Bot Framework attachment '%s' returned data that failed image validation, skipping",
                             att_name or content_url)
-                        return None
-                    return cached.path, cached.media_type, "image"
+                        return None, _ATTACHMENT_FAILED_NOTE.format(name=att_name or "attachment")
+                    return (cached.path, cached.media_type, "image"), None
                 path = await cache_image_from_url(content_url)
-                return (path, content_type, "image") if path else None
+                if path:
+                    return (path, content_type, "image"), None
+                return None, _ATTACHMENT_FAILED_NOTE.format(name=att_name or "attachment")
             except Exception as e:
                 logger.warning("[teams] Failed to cache image attachment: %s", e)
-            return None
+                return None, _dropped_attachment_note(att_name or "attachment", e)
         if content_url:  # direct-URL non-image attachment (video/audio/document)
             try:
                 data = await self._fetch_attachment_bytes(content_url)
                 cached = await cache_media_bytes_async(data, filename=att_name, mime_type=content_type)
-                return (cached.path, cached.media_type, cached.kind) if cached else None
+                if cached:
+                    return (cached.path, cached.media_type, cached.kind), None
+                return None, _ATTACHMENT_UNSUPPORTED_NOTE.format(name=att_name or "attachment")
             except Exception as e:
                 logger.warning("[teams] Failed to cache attachment '%s' (%s): %s", att_name or content_url, content_type, e)
-        return None
+                return None, _dropped_attachment_note(att_name or "attachment", e)
+        return None, None
 
     async def _send_card(self, chat_id: str, card: AdaptiveCard) -> Any:
         """Send an AdaptiveCard, using a stored ConversationReference when available."""

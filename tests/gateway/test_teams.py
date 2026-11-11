@@ -615,6 +615,131 @@ class TestTeamsAttachmentClassification:
         assert len(event.media_urls) == 2
 
 
+class TestTeamsDroppedAttachmentNotes:
+    """A file the gateway could not cache must still reach the agent as a note in the event
+    text — otherwise the agent answers that nothing was attached while the user can see their
+    file (regression for #151903: a 969 MB recording sent three times, never acknowledged)."""
+
+    def _make_adapter(self):
+        adapter = TeamsAdapter(_make_config(
+            client_id="bot-id", client_secret="secret", tenant_id="tenant",
+        ))
+        adapter._app = MagicMock()
+        adapter._app.id = "bot-id"
+        adapter.handle_message = AsyncMock()
+        return adapter
+
+    def _make_activity(self, attachments, text="please summarise this"):
+        activity = MagicMock()
+        activity.text = text
+        activity.id = "activity-att-002"
+        activity.from_ = MagicMock()
+        activity.from_.id = "user-123"
+        activity.from_.aad_object_id = "aad-456"
+        activity.from_.name = "Test User"
+        activity.conversation = MagicMock()
+        activity.conversation.id = "19:abc@thread.v2"
+        activity.conversation.conversation_type = "personal"
+        activity.conversation.name = "Test Chat"
+        activity.conversation.tenant_id = "tenant-789"
+        activity.attachments = attachments
+        return activity
+
+    def _make_ctx(self, activity):
+        ctx = MagicMock()
+        ctx.activity = activity
+        return ctx
+
+    def _file_download_attachment(self, name="meeting.mov", file_type="mov"):
+        att = MagicMock()
+        att.content_type = "application/vnd.microsoft.teams.file.download.info"
+        att.content_url = None
+        att.name = name
+        att.content = {
+            "downloadUrl": "https://contoso.sharepoint.com/download/x",
+            "fileType": file_type,
+        }
+        return att
+
+    @pytest.mark.anyio
+    async def test_oversized_file_download_info_surfaces_size_note(self):
+        adapter = self._make_adapter()
+        adapter._fetch_attachment_bytes = AsyncMock(side_effect=ValueError(
+            "Inbound attachment payload is too large (1015872292 bytes > 134217728 bytes)"))
+
+        await adapter._on_message(self._make_ctx(self._make_activity([self._file_download_attachment()])))
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls == []
+        assert event.text == (
+            "please summarise this\n"
+            "[Attachment not received: 'meeting.mov' did not reach you because it is 969 MB, "
+            "over the 128 MB limit for files sent in Teams.]")
+
+    @pytest.mark.anyio
+    async def test_failed_file_download_surfaces_generic_note(self):
+        adapter = self._make_adapter()
+        adapter._fetch_attachment_bytes = AsyncMock(side_effect=RuntimeError("connection reset"))
+
+        await adapter._on_message(self._make_ctx(self._make_activity([self._file_download_attachment()])))
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls == []
+        assert event.text == (
+            "please summarise this\n"
+            "[Attachment not received: 'meeting.mov' could not be downloaded in Teams.]")
+
+    @pytest.mark.anyio
+    async def test_unsupported_document_surfaces_unsupported_note(self):
+        adapter = self._make_adapter()
+        adapter._fetch_attachment_bytes = AsyncMock(return_value=b"%PDF-1.4 fake")
+
+        async def _no_media(*a, **kw):
+            return None
+
+        with patch.object(_teams_mod, "cache_media_bytes_async", _no_media):
+            await adapter._on_message(self._make_ctx(self._make_activity([self._file_download_attachment()])))
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls == []
+        assert event.text == (
+            "please summarise this\n"
+            "[Attachment not received: 'meeting.mov' has a file type Hermes cannot receive in Teams.]")
+
+    @pytest.mark.anyio
+    async def test_oversized_direct_url_attachment_surfaces_size_note(self):
+        adapter = self._make_adapter()
+        adapter._fetch_attachment_bytes = AsyncMock(side_effect=ValueError(
+            "Inbound attachment payload is too large (268435456 bytes > 134217728 bytes)"))
+        att = MagicMock()
+        att.content_type = "video/mp4"
+        att.content_url = "https://contoso.sharepoint.com/big.mp4"
+        att.name = "big.mp4"
+
+        await adapter._on_message(self._make_ctx(self._make_activity([att])))
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls == []
+        assert event.text == (
+            "please summarise this\n"
+            "[Attachment not received: 'big.mp4' did not reach you because it is 256 MB, "
+            "over the 128 MB limit for files sent in Teams.]")
+
+    @pytest.mark.anyio
+    async def test_body_mirror_and_card_attachments_produce_no_note(self):
+        adapter = self._make_adapter()
+        adapter._fetch_attachment_bytes = AsyncMock(side_effect=AssertionError("must not be called"))
+        html = MagicMock()
+        html.content_type = "text/html"
+        html.content_url = None
+        html.name = ""
+        card = MagicMock()
+        card.content_type = "application/vnd.microsoft.card.adaptive"
+        card.content_url = None
+        card.name = ""
+
+        await adapter._on_message(self._make_ctx(self._make_activity([html, card])))
+        event = adapter.handle_message.call_args[0][0]
+        assert event.media_urls == []
+        assert event.text == "please summarise this"
+
+
 # ── Bot Framework connector attachments (pasted images) ──────────────────
 
 

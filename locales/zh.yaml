@@ -1408,6 +1408,7 @@ platform:
       thinking: "Hermes 正在思考…"
       interrupted: "（已中断）"
       no_reply: "（无回复）"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ 我无法附上 **{filename}**。"
       explain: "Google Chat 只有在机器人获得你的明确授权（用户 OAuth）后才允许发送文件附件。这是一次性的授权，可直接在本聊天中完成。"

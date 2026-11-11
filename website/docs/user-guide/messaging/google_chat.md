@@ -223,6 +223,26 @@ gets edited in place with the response — so whatever you set here briefly
 appears in the chat as a normal message. Set `typing_indicator: false` to
 disable the marker entirely.
 
+### Answering as a separate message
+
+By default the answer is edited into the "thinking…" marker, which Google
+Chat does not notify about or mark unread — if you switch away while the bot
+is thinking, you may never notice it answered. Set `typing_card: separate` to
+post the answer as a new message in your thread instead (which notifies
+normally), leaving the marker behind as a small `✓`:
+
+```yaml
+platforms:
+  google_chat:
+    # Post the answer as a new message; retire the marker to "✓"
+    # (default: "patch" — edit the answer into the marker in place).
+    typing_card: separate
+```
+
+The marker is never deleted, so there is no "Message deleted" tombstone. If
+the answer fails to post, the marker stays up and is labelled `(no reply)` at
+the end of the turn instead.
+
 ---
 
 ## Formatting and capabilities

@@ -1408,6 +1408,7 @@ platform:
       thinking: "Hermes думає…"
       interrupted: "(перервано)"
       no_reply: "(без відповіді)"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ Не вдалося прикріпити **{filename}**."
       explain: "Google Chat дозволяє прикріплювати файли лише тоді, коли бот має ваш явний дозвіл (OAuth користувача). Це одноразова згода, яку можна надати з цього чату."

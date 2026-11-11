@@ -1408,6 +1408,7 @@ platform:
       thinking: "Hermes يفكّر…"
       interrupted: "(قُطع)"
       no_reply: "(لا ردّ)"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ تعذّر عليّ إرفاق **{filename}**."
       explain: "لا يسمح Google Chat بإرفاق الملفات إلا إذا حصل البوت على إذنك الصريح (OAuth للمستخدم). إنها موافقة لمرة واحدة تتم من هذه المحادثة."

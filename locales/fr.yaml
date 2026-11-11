@@ -1634,6 +1634,7 @@ platform:
       thinking: "Hermes réfléchit…"
       interrupted: "(interrompu)"
       no_reply: "(aucune réponse)"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ Je n'ai pas pu joindre **{filename}**."
       explain: "Google Chat n'autorise les pièces jointes que si le bot dispose de votre autorisation explicite (OAuth utilisateur). Il s'agit d'un consentement unique, donné depuis ce chat."

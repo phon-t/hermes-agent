@@ -1470,6 +1470,7 @@ platform:
       thinking: "Hermes is thinking…"
       interrupted: "(interrupted)"
       no_reply: "(no reply)"
+      answered: "✓"
     attachment_fallback:
       # Shipped in Spanish before i18n; es.yaml keeps that original text.
       header: "⚠️ I couldn't attach **{filename}**."

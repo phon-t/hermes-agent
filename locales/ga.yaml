@@ -1408,6 +1408,7 @@ platform:
       thinking: "Tá Hermes ag smaoineamh…"
       interrupted: "(briseadh isteach air)"
       no_reply: "(gan freagra)"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ Níorbh fhéidir liom **{filename}** a cheangal."
       explain: "Ní cheadaíonn Google Chat ceangaltáin chomhaid ach nuair a bhíonn do chead sainráite ag an mbot (OAuth úsáideora). Toiliú aonuaire atá ann a dhéantar ón gcomhrá seo."

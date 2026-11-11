@@ -993,6 +993,205 @@ class TestTypingLifecycle:
 
 
 # ===========================================================================
+# typing_card: separate — the answer posts as its own message (which Google
+# Chat notifies about) and the typing card retires to a "✓" marker (#151734).
+# ===========================================================================
+
+
+def _ok_result(message_id="spaces/S/messages/M"):
+    return type("R", (), {"success": True, "message_id": message_id, "error": None})()
+
+
+class TestTypingCardSeparate:
+
+    def _separate(self, adapter):
+        adapter.config.extra["typing_card"] = "separate"
+        return adapter
+
+    @pytest.mark.asyncio
+    async def test_separate_send_creates_answer_and_retires_card(self, adapter):
+        """The answer is a NEW message in the thread (not a patch of the marker),
+        and the marker retires to "✓" with the slot consumed."""
+        from plugins.platforms.google_chat.adapter import _TYPING_CONSUMED_SENTINEL
+
+        self._separate(adapter)
+        adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._patch_message = AsyncMock(return_value=_ok_result("spaces/S/messages/THINK"))
+        adapter._create_message = AsyncMock(return_value=_ok_result())
+
+        result = await adapter.send(
+            "spaces/S", "hola", metadata={"thread_id": "spaces/S/threads/T"})
+
+        assert result.success is True
+        adapter._create_message.assert_awaited_once()
+        create_body = adapter._create_message.await_args.args[1]
+        assert create_body["text"] == "hola"
+        assert create_body["thread"] == {"name": "spaces/S/threads/T"}
+        adapter._patch_message.assert_awaited_once()
+        patch_id, patch_body = adapter._patch_message.await_args.args
+        assert patch_id == "spaces/S/messages/THINK"
+        assert patch_body == {"text": "✓"}
+        assert adapter._typing_messages["spaces/S"] == _TYPING_CONSUMED_SENTINEL
+
+    @pytest.mark.asyncio
+    async def test_separate_send_failed_create_keeps_card_tracked(self, adapter):
+        """A failed create leaves the card tracked, so on_processing_complete can
+        still label it "(no reply)" — the card is only retired once an answer lands."""
+        self._separate(adapter)
+        adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._patch_message = AsyncMock(return_value=_ok_result("spaces/S/messages/THINK"))
+        adapter._create_message = AsyncMock(
+            side_effect=_FakeHttpError(status=500, reason="boom"))
+
+        with pytest.raises(_FakeHttpError):
+            await adapter.send("spaces/S", "hola")
+
+        adapter._patch_message.assert_not_called()
+        assert adapter._typing_messages["spaces/S"] == "spaces/S/messages/THINK"
+
+    @pytest.mark.asyncio
+    async def test_separate_send_failed_then_completion_labels_no_reply(self, adapter):
+        """End to end of the failure path: failed create (card kept) + turn end
+        labels the stranded card "(no reply)"."""
+        self._separate(adapter)
+        adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._patch_message = AsyncMock(return_value=_ok_result("spaces/S/messages/THINK"))
+        adapter._create_message = AsyncMock(
+            side_effect=_FakeHttpError(status=500, reason="boom"))
+
+        with pytest.raises(_FakeHttpError):
+            await adapter.send("spaces/S", "hola")
+
+        event = MagicMock()
+        event.source = MagicMock()
+        event.source.chat_id = "spaces/S"
+        await adapter.on_processing_complete(event, ProcessingOutcome.FAILURE)
+        adapter._patch_message.assert_awaited_once()
+        assert "no reply" in adapter._patch_message.await_args.args[1]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_separate_send_multichunk_creates_each_chunk(self, adapter):
+        """Every chunk is its own threaded message; the card retires exactly once."""
+        self._separate(adapter)
+        adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._patch_message = AsyncMock(return_value=_ok_result("spaces/S/messages/THINK"))
+        adapter._create_message = AsyncMock(return_value=_ok_result())
+
+        result = await adapter.send(
+            "spaces/S", "x" * 9000, metadata={"thread_id": "spaces/S/threads/T"})
+
+        assert result.success is True
+        assert adapter._create_message.await_count == 3
+        for call in adapter._create_message.await_args_list:
+            assert call.args[1]["thread"] == {"name": "spaces/S/threads/T"}
+        adapter._patch_message.assert_awaited_once()
+        assert adapter._patch_message.await_args.args[1] == {"text": "✓"}
+
+    @pytest.mark.asyncio
+    async def test_separate_send_image_creates_and_retires_card(self, adapter):
+        """An image answer is created as its own message; the card retires to "✓"
+        instead of being patched with the caption."""
+        self._separate(adapter)
+        adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._patch_message = AsyncMock(return_value=_ok_result("spaces/S/messages/THINK"))
+        adapter._create_message = AsyncMock(return_value=_ok_result())
+
+        result = await adapter.send_image(
+            "spaces/S", "https://example.com/cat.png", caption="a cat",
+            metadata={"thread_id": "spaces/S/threads/T"})
+
+        assert result.success is True
+        adapter._create_message.assert_awaited_once()
+        create_body = adapter._create_message.await_args.args[1]
+        assert "a cat" in create_body["text"] and "https://example.com/cat.png" in create_body["text"]
+        adapter._patch_message.assert_awaited_once()
+        assert adapter._patch_message.await_args.args[1] == {"text": "✓"}
+
+    @pytest.mark.asyncio
+    async def test_separate_send_file_native_upload_retires_card(self, adapter, tmp_path):
+        """Native file delivery: upload + create, then the card retires to "✓"
+        (no caption pre-patched into it)."""
+        from plugins.platforms.google_chat.adapter import _TYPING_CONSUMED_SENTINEL
+
+        self._separate(adapter)
+        adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._patch_message = AsyncMock(return_value=_ok_result("spaces/S/messages/THINK"))
+        f = tmp_path / "report.pdf"
+        f.write_bytes(b"%PDF-fake")
+        upload_call = MagicMock()
+        upload_call.return_value.execute = MagicMock(
+            return_value={"attachmentDataRef": {"resourceName": "ref-abc"}})
+        create_call = MagicMock()
+        create_call.return_value.execute = MagicMock(
+            return_value={"name": "spaces/S/messages/MID"})
+        adapter._user_chat_api = MagicMock()
+        adapter._user_chat_api.media.return_value.upload = upload_call
+        adapter._user_chat_api.spaces.return_value.messages.return_value.create = create_call
+        adapter._user_credentials = MagicMock(valid=True)
+        adapter._consume_typing_card_with_text = AsyncMock(return_value=None)
+
+        result = await adapter._send_file(
+            "spaces/S", str(f), caption="caption",
+            mime_hint="application/pdf", thread_id="spaces/S/threads/T")
+
+        assert result.success is True
+        adapter._consume_typing_card_with_text.assert_not_called()
+        adapter._patch_message.assert_awaited_once()
+        assert adapter._patch_message.await_args.args[1] == {"text": "✓"}
+        assert adapter._typing_messages["spaces/S"] == _TYPING_CONSUMED_SENTINEL
+
+    @pytest.mark.asyncio
+    async def test_separate_send_file_fallback_retires_card(self, adapter, tmp_path):
+        """No user OAuth: the fallback notice posts as a new message and the card
+        retires to "✓" (the notice is the visible answer)."""
+        self._separate(adapter)
+        adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._patch_message = AsyncMock(return_value=_ok_result("spaces/S/messages/THINK"))
+        adapter._create_message = AsyncMock(return_value=_ok_result())
+        adapter._acquire_user_chat_api = AsyncMock(return_value=(None, None))
+        f = tmp_path / "report.pdf"
+        f.write_bytes(b"%PDF-fake")
+
+        result = await adapter._send_file(
+            "spaces/S", str(f), caption="caption",
+            mime_hint="application/pdf", thread_id="spaces/S/threads/T")
+
+        assert result.success is False  # fallback notice always reports failure
+        adapter._create_message.assert_awaited_once()
+        adapter._patch_message.assert_awaited_once()
+        assert adapter._patch_message.await_args.args[1] == {"text": "✓"}
+
+    @pytest.mark.asyncio
+    async def test_separate_cancel_still_labels_interrupted(self, adapter):
+        """Cancel before any send: the still-tracked card is labelled "(interrupted)"."""
+        self._separate(adapter)
+        adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._patch_message = AsyncMock(return_value=_ok_result("spaces/S/messages/THINK"))
+
+        event = MagicMock()
+        event.source = MagicMock()
+        event.source.chat_id = "spaces/S"
+        await adapter.on_processing_complete(event, ProcessingOutcome.CANCELLED)
+
+        adapter._patch_message.assert_awaited_once()
+        assert "interrupted" in adapter._patch_message.await_args.args[1]["text"].lower()
+
+    @pytest.mark.asyncio
+    async def test_unknown_typing_card_value_keeps_patch_mode(self, adapter):
+        """An unknown value is not a mode: today's patch-in-place behaviour."""
+        adapter.config.extra["typing_card"] = "bogus"
+        adapter._typing_messages["spaces/S"] = "spaces/S/messages/THINK"
+        adapter._patch_message = AsyncMock(return_value=_ok_result("spaces/S/messages/THINK"))
+        adapter._create_message = AsyncMock()
+
+        result = await adapter.send("spaces/S", "hola")
+
+        assert result.success is True
+        adapter._patch_message.assert_awaited_once()
+        adapter._create_message.assert_not_called()
+
+
+# ===========================================================================
 # edit_message / delete_message — required by gateway tool-progress + streaming
 # ===========================================================================
 

@@ -1069,7 +1069,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
                    metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Send a text message; ``metadata`` may carry ``thread_id``. A tracked typing card is
         patched in place (delete would leave a "Message deleted" tombstone) with the first
-        chunk, further chunks are new messages; ``_keep_typing`` is paused meanwhile."""
+        chunk, further chunks are new messages; ``_keep_typing`` is paused meanwhile.
+        ``typing_card: separate`` instead posts every chunk as a new message in the thread and
+        retires the card to a marker once the first chunk lands — a failed create leaves the
+        card tracked, so ``on_processing_complete`` still labels it "(no reply)"."""
         thread_id = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)
         self.pause_typing_for_chat(chat_id)
         try:
@@ -1078,19 +1081,28 @@ class GoogleChatAdapter(BasePlatformAdapter):
             if not chunks:
                 return SendResult(success=False, error="empty message")
             last_result: Optional[SendResult] = None
-            typing_msg_name = self._typing_messages.pop(chat_id, None)
+            separate = self._typing_card_separate()
+            if separate:
+                typing_msg_name = self._typing_messages.get(chat_id)
+            else:
+                typing_msg_name = self._typing_messages.pop(chat_id, None)
             if typing_msg_name == _TYPING_CONSUMED_SENTINEL:
                 typing_msg_name = None
             patched_typing = False
+            retired_typing = False
             for idx, chunk in enumerate(chunks):
-                # Only set thread on the create path; patch inherits.
-                body = _thread_body(chunk, thread_id if (idx > 0 or not typing_msg_name) else None)
+                # Only set thread on the create path; patch inherits. Separate mode never
+                # patches, so every chunk is a create in the thread.
+                body = _thread_body(chunk, thread_id if (idx > 0 or not typing_msg_name or separate) else None)
                 try:
-                    if idx == 0 and typing_msg_name:
+                    if idx == 0 and typing_msg_name and not separate:
                         last_result = await self._patch_message(typing_msg_name, body)
                         patched_typing = True
                     else:
                         last_result = await self._create_message(chat_id, body)
+                        if separate and typing_msg_name and not retired_typing:
+                            await self._retire_typing_card(chat_id)
+                            retired_typing = True
                 except HttpError as exc:
                     status = _http_status(exc)
                     if status == 403:
@@ -1101,7 +1113,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
                         return SendResult(success=False, error=str(exc))
                     if status == 404:
                         # Typing card deleted under us: fall back to a fresh message.
-                        if idx == 0 and typing_msg_name:
+                        if idx == 0 and typing_msg_name and not separate:
                             logger.info("[GoogleChat] Typing card disappeared; creating new message")
                             typing_msg_name = None
                             last_result = await self._create_message(chat_id, body)
@@ -1370,6 +1382,24 @@ class GoogleChatAdapter(BasePlatformAdapter):
             logger.debug("[GoogleChat] cleanup in on_processing_complete failed", exc_info=True)
 
     # -- attachments ---------------------------------------------------------
+    def _typing_card_separate(self) -> bool:
+        """``typing_card: separate`` (``platforms.google_chat.typing_card`` in config.yaml):
+        the answer posts as its own message and the typing card retires to a marker. Anything
+        else — including an unknown value — keeps today's patch-in-place."""
+        return str(self.config.extra.get("typing_card") or "patch").strip().lower() == "separate"
+
+    async def _retire_typing_card(self, chat_id: str) -> None:
+        """Patch the tracked typing card to the answered marker and mark the slot consumed
+        (``typing_card: separate``): the card stays a visible acknowledgement, never a tombstone.
+        Best-effort — a failed patch leaves the stale marker; the answer itself was already
+        created as its own message."""
+        current = self._typing_messages.pop(chat_id, None)
+        if not current or current == _TYPING_CONSUMED_SENTINEL:
+            return
+        await self._patch_quietly(current, t("platform.google_chat.typing.answered"),
+                                  "[GoogleChat] typing-card retire patch failed")
+        self._typing_messages[chat_id] = _TYPING_CONSUMED_SENTINEL
+
     async def _consume_typing_card_with_text(self, chat_id: str, text: str) -> Optional[SendResult]:
         """Patch the tracked typing card with ``text`` (no tombstone); None when there is no
         real card (caller creates a message) — the SENTINEL stays so ``_keep_typing`` doesn't
@@ -1395,6 +1425,10 @@ class GoogleChatAdapter(BasePlatformAdapter):
         thread_id = self._resolve_thread_id(reply_to, metadata, chat_id=chat_id)
         text = "\n".join(([caption] if caption else []) + [image_url])
         try:
+            if self._typing_card_separate():
+                result = await self._create_message(chat_id, _thread_body(text, thread_id))
+                await self._retire_typing_card(chat_id)
+                return result
             patched = await self._consume_typing_card_with_text(chat_id, text)
             if patched is not None:
                 return patched
@@ -1509,7 +1543,9 @@ class GoogleChatAdapter(BasePlatformAdapter):
         """Native attachment: user-authed ``media.upload`` then ``messages.create`` with the
         latest inbound sender's token (legacy token as fallback; text notice when neither).
         ``messages.patch`` cannot add attachments, so the typing card is patched with the
-        caption (or a single space) to retire it without a tombstone."""
+        caption (or a single space) to retire it without a tombstone — unless
+        ``typing_card: separate``, which leaves the card up until the file message lands
+        and then retires it to a marker."""
         if not os.path.exists(path):
             return SendResult(success=False, error=f"file not found: {path}")
         filename = override_filename or os.path.basename(path) or "upload.bin"
@@ -1518,7 +1554,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         if chat_api is None:
             return await self._post_attachment_fallback(chat_id, path, filename, caption, thread_id)
         try:
-            await self._consume_typing_card_with_text(chat_id, caption or " ")
+            if not self._typing_card_separate():
+                await self._consume_typing_card_with_text(chat_id, caption or " ")
         except Exception as exc:
             logger.debug("[GoogleChat] _send_file pre-patch typing-card failed", exc_info=not _proxy_error(exc))
 
@@ -1547,6 +1584,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         try:
             resp = await asyncio.to_thread(lambda: chat_api.spaces().messages().create(**create_kwargs).execute())
             self._track_outbound_thread(chat_id, resp)
+            if self._typing_card_separate():
+                await self._retire_typing_card(chat_id)
             return SendResult(success=True, message_id=resp.get("name"))
         except HttpError as exc:
             return SendResult(success=False, error=_exc_text(exc))
@@ -1565,6 +1604,8 @@ class GoogleChatAdapter(BasePlatformAdapter):
         try:
             if body:
                 await self._create_message(chat_id, _thread_body(body, thread_id))
+                if self._typing_card_separate():
+                    await self._retire_typing_card(chat_id)
         except Exception as exc:
             logger.debug("[GoogleChat] attachment fallback notice send failed", exc_info=not _proxy_error(exc))
         return SendResult(

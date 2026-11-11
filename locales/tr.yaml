@@ -1408,6 +1408,7 @@ platform:
       thinking: "Hermes düşünüyor…"
       interrupted: "(kesildi)"
       no_reply: "(yanıt yok)"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ **{filename}** dosyasını ekleyemedim."
       explain: "Google Chat, dosya eklerine yalnızca bot açık izninize sahipse (kullanıcı OAuth) izin verir. Bu, bu sohbetten yapılan tek seferlik bir onaydır."

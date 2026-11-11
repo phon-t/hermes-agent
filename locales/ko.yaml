@@ -1408,6 +1408,7 @@ platform:
       thinking: "Hermes가 생각하고 있어요…"
       interrupted: "(중단됨)"
       no_reply: "(응답 없음)"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ **{filename}** 파일을 첨부하지 못했어요."
       explain: "Google Chat은 봇에 명시적인 권한(사용자 OAuth)이 있을 때만 파일 첨부를 허용해요. 이 채팅에서 한 번만 동의하면 돼요."

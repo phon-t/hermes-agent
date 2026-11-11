@@ -1425,6 +1425,7 @@ platform:
       thinking: "Hermes gondolkodik…"
       interrupted: "(megszakítva)"
       no_reply: "(nincs válasz)"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ Nem sikerült csatolni: **{filename}**."
       explain: "A Google Chat csak akkor engedi a fájlcsatolást, ha a bot kifejezett engedélyt kapott tőled (felhasználói OAuth). Ez egy egyszeri hozzájárulás, amit ebből a csevegésből adhatsz meg."

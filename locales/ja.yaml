@@ -1408,6 +1408,7 @@ platform:
       thinking: "Hermes が考えています…"
       interrupted: "（中断されました）"
       no_reply: "（返信なし）"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ **{filename}** を添付できませんでした。"
       explain: "Google Chat では、ボットに明示的な許可（ユーザー OAuth）がある場合のみファイルを添付できます。このチャットから一度だけ同意すれば完了します。"

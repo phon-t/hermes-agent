@@ -1408,6 +1408,7 @@ platform:
       thinking: "Hermes dink…"
       interrupted: "(onderbreek)"
       no_reply: "(geen antwoord)"
+      answered: "✓"
     attachment_fallback:
       header: "⚠️ Ek kon nie **{filename}** aanheg nie."
       explain: "Google Chat laat lêeraanhegsels slegs toe wanneer die bot jou uitdruklike toestemming het (gebruiker-OAuth). Dit is 'n eenmalige toestemming wat vanuit hierdie klets gegee word."

@@ -24755,7 +24755,7 @@
       },
       "MessageStartPayload": {
         "additionalProperties": false,
-        "description": "``message.start``. Empty from the TUI gateway's emitters and for an ordinary admission;\n``gateway/session_authority._stamp_claim`` adds an automation admission's async-result card\n(``session_automation.admission_display``: a background-process completion) and its model\ntext, so a viewer that did not submit the turn paints the same header the submitter would.",
+        "description": "``message.start``. Empty from the TUI gateway's emitters and for an ordinary admission;\n``gateway/session_authority._stamp_claim`` adds an automation admission's async-result card\n(``session_automation.admission_display``: a background-process completion) and its model\ntext, so a viewer that did not submit the turn paints the same header the submitter would.\nA prompt turn adds the accepted user message (``user_*``), so a viewer that did not submit\nit merges the prompt by durable row identity instead of waiting for a history refetch\n(#151742); absent for turns with no submit-time user row (auto-continue, goal follow-up,\nsystem turns).",
         "properties": {
           "display_kind": {
             "anyOf": [
@@ -24816,6 +24816,57 @@
             ],
             "default": null,
             "title": "Turn Id"
+          },
+          "user_row_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Row Id"
+          },
+          "user_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Text"
+          },
+          "user_timestamp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Timestamp"
+          },
+          "user_images": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "User Images"
           }
         },
         "title": "MessageStartPayload",

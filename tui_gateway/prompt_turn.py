@@ -1123,6 +1123,25 @@ def _reopen_routed_session_row(db, sid: str, session: dict) -> None:
         logger.debug("routing-provenance reopen failed for %s", session_id, exc_info=True)
 
 
+def _message_start_user_payload(session: dict, text: Any, images: list | None) -> dict | None:
+    """The accepted user message for ``message.start``, or ``None`` when this turn has no
+    submit-time user row (auto-continue, goal follow-up, system turns): a viewer that did not
+    submit the turn merges it by durable row identity instead of waiting for a history refetch
+    (#151742). The staged row must be THIS turn's (``content == text``) — a stale row from an
+    earlier send would mislabel the turn."""
+    staged = session.get("_submit_user_row") or {}
+    if not isinstance(staged, dict) or staged.get("content") != text:
+        return None
+    if not isinstance(staged.get("_row_id"), int):
+        return None
+    payload: dict[str, Any] = {"user_row_id": staged["_row_id"], "user_text": staged["content"]}
+    if isinstance(staged.get("timestamp"), (int, float)):
+        payload["user_timestamp"] = staged["timestamp"]
+    if images:
+        payload["user_images"] = list(images)
+    return payload
+
+
 def _run_prompt_submit(
     rid, sid: str, session: dict, text: Any, *, display_kind: str | None = None,
     display_metadata: dict | None = None, image_paths: list[str] | None = None,
@@ -1169,7 +1188,7 @@ def _run_prompt_submit(
     from tui_gateway.stream_segments import SESSION_KEY, TurnSegments  # bound functions run in server's globals
     session[SESSION_KEY] = segments = TurnSegments()
     if not muted:
-        _emit("message.start", sid)
+        _emit("message.start", sid, _message_start_user_payload(session, text, images))
 
     def run_body():
         # RPC-dispatcher ContextVars do not follow onto this thread: rebind the transport

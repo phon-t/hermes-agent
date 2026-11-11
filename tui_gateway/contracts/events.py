@@ -136,7 +136,11 @@ class MessageStartPayload(Payload):
     """``message.start``. Empty from the TUI gateway's emitters and for an ordinary admission;
     ``gateway/session_authority._stamp_claim`` adds an automation admission's async-result card
     (``session_automation.admission_display``: a background-process completion) and its model
-    text, so a viewer that did not submit the turn paints the same header the submitter would."""
+    text, so a viewer that did not submit the turn paints the same header the submitter would.
+    A prompt turn adds the accepted user message (``user_*``), so a viewer that did not submit
+    it merges the prompt by durable row identity instead of waiting for a history refetch
+    (#151742); absent for turns with no submit-time user row (auto-continue, goal follow-up,
+    system turns)."""
 
     display_kind: str | None = None
     display_text: str | None = None
@@ -145,6 +149,14 @@ class MessageStartPayload(Payload):
     #: ``stream_segments.TurnSegments`` identity of the prompt turn; a client that sees the same id again is
     #: looking at a re-sent frame of the turn it already has, not a new turn.
     turn_id: str | None = None
+    #: Durable row id of the accepted user message (``SessionDB`` row, as in ``SessionMessage.row_id``).
+    user_row_id: int | None = None
+    #: The accepted prompt text, as written to that row.
+    user_text: str | None = None
+    #: Epoch seconds the user message was written (``stamp_message_timestamp``).
+    user_timestamp: float | None = None
+    #: Admitted image paths, when the prompt carried any (backend-local paths, as in history rows).
+    user_images: list[str] | None = None
 
 
 event("message.start", MessageStartPayload,

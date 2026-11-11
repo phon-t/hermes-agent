@@ -5866,13 +5866,17 @@ export interface ErrorPayload {
 export interface NoticePayload {
   message: string
 }
-/** ``message.start``. Empty from the TUI gateway's emitters and for an ordinary admission; ``gateway/session_authority._stamp_claim`` adds an automation admission's async-result card (``session_automation.admission_display``: a background-process completion) and its model text, so a viewer that did not submit the turn paints the same header the submitter would. */
+/** ``message.start``. Empty from the TUI gateway's emitters and for an ordinary admission; ``gateway/session_authority._stamp_claim`` adds an automation admission's async-result card (``session_automation.admission_display``: a background-process completion) and its model text, so a viewer that did not submit the turn paints the same header the submitter would. A prompt turn adds the accepted user message (``user_*``), so a viewer that did not submit it merges the prompt by durable row identity instead of waiting for a history refetch (#151742); absent for turns with no submit-time user row (auto-continue, goal follow-up, system turns). */
 export interface MessageStartPayload {
   display_kind?: string | null
   display_text?: string | null
   notification_category?: string | null
   text?: string | null
   turn_id?: string | null
+  user_row_id?: number | null
+  user_text?: string | null
+  user_timestamp?: number | null
+  user_images?: string[] | null
 }
 /** ``message.delta``. A session-authority local-viewer turn also publishes ``text: null``: the reply segment boundary (the agent's ``stream_delta_callback(None)``, before tool lines) that closes the classic CLI's reply box. Every other viewer ignores an empty chunk. A prompt turn stamps ``turn_id`` + ``segment`` (interim seals before it) + ``offset`` (UTF-16 code units of that segment already sent): a client drops a re-sent chunk it already applied. */
 export interface MessageDeltaPayload {

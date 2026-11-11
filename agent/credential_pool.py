@@ -6,9 +6,11 @@ from agent.credential_pool_admin import CredentialPoolAdminMixin
 from agent.credential_pool_model_cooldowns import CredentialPoolModelCooldownMixin, model_cooldown_until
 from agent.credential_pool_timestamps import _parse_absolute_timestamp
 
+import contextlib
 import logging
 import os
 import random
+import tempfile
 import threading
 import time
 import uuid
@@ -934,6 +936,11 @@ REFRESHABLE_OAUTH_PROVIDERS = frozenset({"anthropic", "nous", *_TOKENS_SINGLETON
 # its refresh path serializes on its own auth-store lock (``_refresh_entry_impl`` nous branch).
 _SINGLE_USE_REFRESH_PROVIDERS = ("openai-codex", "xai-oauth", "anthropic")
 
+# Headroom the reserve-before-rotate probe writes beside auth.json on top of the
+# store's current size: a rotation rewrites the whole file, so the probe must
+# prove a full rewrite fits, not just the few hundred bytes the tokens change.
+_ROTATION_RESERVE_HEADROOM_BYTES = 65536
+
 # Lock-free window between consecutive auth-store holds in a deferred refresh sweep
 # (_refresh_pending_entries): a waiter with a shorter timeout (Desktop assistant start,
 # AUTH_LOCK_TIMEOUT_SECONDS = 15s) can acquire between two entries' holds instead of
@@ -1485,6 +1492,58 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             state["last_refresh"] = entry.last_refresh
         return True
 
+    def _rotation_persist_target(self) -> Path:
+        """auth.json path ``_persist`` will write the rotated pair to: the
+        borrowed global-root store for a borrowed single-use pool, else the
+        active store (the same branch ``persist_pool_entries`` takes)."""
+        if self.provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(self.provider):
+            root = _borrowed_single_use_pool_root()
+            if root is not None:
+                return root
+        return auth_mod._auth_file_path()
+
+    def _reserve_rotation_persist(self) -> None:
+        """Prove the rotation's persist target can take an atomic rewrite.
+
+        Writes, fsyncs and renames a scratch file beside the target holding
+        the store's current size plus headroom — the same syscall set the
+        atomic writer uses (temp + fsync + rename) — then removes it. Raises
+        ``OSError`` when the store cannot take the write, so the caller can
+        skip the refresh BEFORE the POST consumes the old single-use refresh
+        token (#151973). The scratch file is removed on every path; the store
+        itself is never touched. A missing parent directory fails the probe
+        rather than creating it: the write path creates parents itself, but a
+        refresh must not resurrect a removed profile's home to test writability.
+        """
+        target = self._rotation_persist_target()
+        try:
+            current_size = target.stat().st_size
+        except OSError:
+            current_size = 0
+        probe_size = current_size + _ROTATION_RESERVE_HEADROOM_BYTES
+        fd, tmp_name = tempfile.mkstemp(prefix=".hermes-reserve-", dir=str(target.parent))
+        tmp_path = Path(tmp_name)
+        scratch = target.parent / (tmp_path.name + ".probe")
+        try:
+            chunk = b"\0" * 8192
+            remaining = probe_size
+            while remaining > 0:
+                take = min(len(chunk), remaining)
+                written = os.write(fd, chunk[:take])
+                remaining -= written
+            os.fsync(fd)
+            os.close(fd)
+            fd = -1
+            os.replace(tmp_path, scratch)
+        finally:
+            if fd >= 0:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            with contextlib.suppress(OSError):
+                os.unlink(scratch)
+
     # ---- refresh -----------------------------------------------------------
 
     def _refresh_entry(self, entry: PooledCredential, *, force: bool, failed_key: Optional[str] = None):
@@ -1506,6 +1565,23 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # cross-process auth-store flock; a waiter's in-lock re-sync picks up
         # the winner's rotated token and skips the POST.
         with _auth_store_lock(timeout_seconds=self._single_use_refresh_lock_timeout()):
+            # Reserve before rotate (#151973): the refresh POST below consumes
+            # the old single-use refresh token, so the rotated pair must have
+            # somewhere durable to land BEFORE it is spent. Prove the store
+            # _persist will write can take one more atomic rewrite; when it
+            # cannot (ENOSPC, read-only directory), skip the refresh entirely
+            # and keep the still-valid access token until it expires — the next
+            # attempt retries once space is back. Never bench the credential
+            # here: the token is fine, the disk is not.
+            try:
+                self._reserve_rotation_persist()
+            except OSError as exc:
+                logger.warning(
+                    "%s pool: skipping refresh of %s — credential store cannot "
+                    "take a write (%s); single-use refresh token NOT spent",
+                    self.provider, entry.id, exc,
+                )
+                return entry
             if self.provider == "openai-codex":
                 synced = self._sync_entry_from_auth_store(entry)
                 if synced is not entry and not force and not self._entry_needs_refresh(synced):

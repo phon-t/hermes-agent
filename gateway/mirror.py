@@ -29,6 +29,43 @@ def _resolve_sessions_index() -> Path:
             else get_hermes_home() / "sessions" / "sessions.json")
 
 
+def _candidate_state_db_paths() -> list[Path]:
+    """state.db files that may own a mirrored session, preferred first.
+
+    The launch (current) store first, then the default profile's store, then
+    every named profile's store under the hermes root. Only files that exist:
+    probing must never create a store for a profile that has none (#151923).
+    """
+    candidates: list[Path] = []
+
+    def _add(path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved not in candidates and path.is_file():
+            candidates.append(resolved)
+
+    _add(get_hermes_home() / "state.db")
+    try:
+        from hermes_constants import get_default_hermes_root
+
+        root = get_default_hermes_root()
+    except Exception:
+        root = None
+    if root is not None:
+        _add(root / "state.db")
+        profiles_dir = root / "profiles"
+        try:
+            children = sorted(profiles_dir.iterdir(), key=lambda p: p.name) if profiles_dir.is_dir() else []
+        except OSError:
+            children = []
+        for child in children:
+            if child.is_dir():
+                _add(child / "state.db")
+    return candidates
+
+
 def _origin_user_id(entry: dict) -> str:
     return str((entry.get("origin") or {}).get("user_id") or "")
 
@@ -42,6 +79,9 @@ def mirror_to_session(
     Pass ``session_id`` when the caller already holds the exact session (e.g. the
     cron in_channel seed) to skip the origin scan, which refuses to guess on a
     populated chat (flat + N thread sessions per chat_id) and would drop the mirror.
+    An explicit id is routed by existence: the write lands in whichever profile
+    store actually holds the session row, so a cron-seeded id from a satellite
+    profile is not forced into the launch profile's store (#151923).
     Text that is NOT the agent speaking (e.g. a cron brief) must pass
     ``role="user"``: ``mirror`` metadata is dropped at the SQLite boundary, so an
     assistant-role mirror replays as a real turn and yields assistant→assistant
@@ -131,11 +171,30 @@ def _append_to_sqlite(session_id: str, message: dict) -> None:
 
     Raises on failure: ``mirror_to_session`` reports ``False`` (and warns) only when the
     exception reaches it — swallowing it here made every failed write look mirrored (#10130).
+
+    The owning store is resolved by existence (#151923): an explicit session id handed over
+    from another profile's store — the multiplexed gateway's cron seed creates the row in
+    the job profile's ``state.db`` while the mirror runs in the launch scope — must land
+    in the store that actually holds the row, not the launch profile's, or the write fails
+    the ``messages.session_id`` foreign key on every catch-up delivery. A session no store
+    holds (retired or ghost id) raises ``LookupError`` instead, so the mirror skips it
+    cleanly rather than failing the FK as an exception every time. A probe failure on one
+    store never blocks the scan; a failed append to the owning store still raises.
     """
     from hermes_state_registry import acquire, release_or_close
 
-    db = acquire()
-    try:
-        db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
-    finally:
-        release_or_close(db)
+    for db_path in _candidate_state_db_paths():
+        db = acquire(db_path)
+        try:
+            try:
+                owns_session = db.get_session_list_row(session_id) is not None
+            except Exception as exc:
+                logger.debug("Mirror owner probe failed on %s: %s", db_path, exc)
+                continue
+            if not owns_session:
+                continue
+            db.append_message(session_id=session_id, role=message.get("role", "assistant"), content=message.get("content"))
+            return
+        finally:
+            release_or_close(db)
+    raise LookupError(f"no session store holds session {session_id!r}; skipping mirror")

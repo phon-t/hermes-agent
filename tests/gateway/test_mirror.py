@@ -2,6 +2,8 @@
 
 import importlib
 import json
+import os
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import gateway.mirror as mirror_mod
@@ -130,10 +132,12 @@ class TestMirrorToSession:
         })
         broken_db = MagicMock()
         broken_db.find_session_by_origin.return_value = None  # resolve via sessions.json
+        broken_db.get_session_list_row.return_value = {"id": "sess_dm"}  # launch store owns it
         broken_db.append_message.side_effect = OSError("disk full")
 
         with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
              patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
+             patch.object(mirror_mod, "_candidate_state_db_paths", return_value=[tmp_path / "state.db"]), \
              patch("hermes_state_registry.acquire", return_value=broken_db), \
              patch("hermes_state_registry.release_or_close"):
             result = mirror_to_session("telegram", "123", "Hello!")
@@ -149,7 +153,8 @@ class TestAppendToSqlite:
         mock_db = MagicMock()
         released = []
 
-        with patch("hermes_state_registry.acquire", return_value=mock_db), \
+        with patch.object(mirror_mod, "_candidate_state_db_paths", return_value=[tmp_path / "state.db"]), \
+             patch("hermes_state_registry.acquire", return_value=mock_db), \
              patch(
                  "hermes_state_registry.release_or_close",
                  side_effect=lambda db: released.append(db),
@@ -208,3 +213,85 @@ class TestSessionsIndexProfileScoping:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "elsewhere"))
 
         assert mirror_mod._find_session_id("telegram", "12345") == "sess_patched"
+
+
+class TestExplicitSessionOwnerRouting:
+    """#151923: an explicit session_id from a foreign profile store must land
+    in the store that holds the row, not the launch profile's.
+
+    Real temp stores: the launch home holds ``state.db`` and a satellite
+    profile holds ``profiles/ops-ming/state.db``; the mirror runs in the
+    launch scope, exactly like the multiplexed gateway's cron catch-up.
+    """
+
+    @staticmethod
+    def _create_store(path: Path, session_id: str) -> None:
+        from hermes_state import SessionDB
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        db = SessionDB(path)
+        try:
+            db.create_session(session_id, source="local")
+        finally:
+            db.close()
+
+    @staticmethod
+    def _messages(path: Path, session_id: str) -> list:
+        from hermes_state import SessionDB
+
+        db = SessionDB(path)
+        try:
+            return db.get_messages(session_id)
+        finally:
+            db.close()
+
+    def test_explicit_id_routes_to_foreign_profile_store(self, tmp_path):
+        """The reported storm: a cron-seeded id that lives only in the job
+        profile's store used to hit the launch store's FK and drop."""
+        home = Path(os.environ["HERMES_HOME"])
+        launch_db = home / "state.db"
+        foreign_db = home / "profiles" / "ops-ming" / "state.db"
+        self._create_store(launch_db, "sess_launch")
+        self._create_store(foreign_db, "20261109_162006_3b03f549")
+
+        assert mirror_to_session(
+            "slack", "C123", "cron brief", source_label="cron", role="user",
+            session_id="20261109_162006_3b03f549",
+        ) is True
+
+        assert [m["content"] for m in self._messages(foreign_db, "20261109_162006_3b03f549")] == ["cron brief"]
+        assert self._messages(launch_db, "20261109_162006_3b03f549") == []
+
+    def test_explicit_id_in_launch_store_stays_there(self, tmp_path):
+        """The preferred (launch) store wins when it holds the row."""
+        home = Path(os.environ["HERMES_HOME"])
+        launch_db = home / "state.db"
+        foreign_db = home / "profiles" / "ops-ming" / "state.db"
+        self._create_store(launch_db, "sess_local")
+        self._create_store(foreign_db, "sess_foreign")
+
+        assert mirror_to_session("telegram", "123", "hello", session_id="sess_local") is True
+
+        assert [m["content"] for m in self._messages(launch_db, "sess_local")] == ["hello"]
+        assert self._messages(foreign_db, "sess_foreign") == []
+
+    def test_ghost_id_skips_cleanly_without_creating_a_row(self, tmp_path):
+        """A retired/ghost id no store holds is skipped (False), not retried
+        against the launch store's FK on every delivery."""
+        home = Path(os.environ["HERMES_HOME"])
+        launch_db = home / "state.db"
+        self._create_store(launch_db, "sess_launch")
+
+        assert mirror_to_session(
+            "slack", "C123", "cron brief", source_label="cron", role="user",
+            session_id="20261109_000000_deadbeef",
+        ) is False
+
+        from hermes_state import SessionDB
+
+        db = SessionDB(launch_db)
+        try:
+            assert db.get_session_list_row("20261109_000000_deadbeef") is None
+            assert [m["content"] for m in db.get_messages("sess_launch")] == []
+        finally:
+            db.close()

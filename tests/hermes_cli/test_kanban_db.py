@@ -551,6 +551,72 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         assert kbd.check_respawn_guard(conn, spawn_failed_id) == "blocker_auth"
 
 
+@pytest.mark.parametrize("latest_outcome", ["completed", "review_requested"])
+def test_respawn_guard_stale_blocker_stamp_superseded_by_newer_run(
+    kanban_home, monkeypatch, latest_outcome,
+):
+    """A stamped quota/auth error is the *latest failure*, not a permanent
+    verdict: once a newer run completes or hands off to review, the stamp is
+    stale — those paths never rewrite ``last_failure_error`` — and must not
+    re-trap the card on every tick (#154423, #119070)."""
+    import hermes_cli.kanban_db as _kb
+
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
+    now = 5_000_000
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="stale-stamp", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome=?, status='done', ended_at=? "
+            "WHERE id=?",
+            (latest_outcome, now, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='ready', current_run_id=NULL, "
+            "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+            "last_failure_error=? WHERE id=?",
+            ("401 authentication failed", tid),
+        )
+        conn.commit()
+
+        # Well past the recent-success window, so only the blocker check
+        # could still guard this card.
+        monkeypatch.setattr(_kb.time, "time", lambda: now + 7200)
+        assert kbd.check_respawn_guard(conn, tid) is None
+
+
+def test_respawn_guard_review_lane_not_vetoed_by_blocker_stamp(
+    kanban_home, monkeypatch,
+):
+    """The review lane is handoff-driven: a failure stamp from the
+    implementation run must not park a requested review forever (#154423).
+    The same stamp still guards the ready lane, where it is a live
+    diagnosis."""
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "0")
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="review-veto", assignee="a")
+        kb.claim_task(conn, tid)
+        run_id = kb.get_task(conn, tid).current_run_id
+        conn.execute(
+            "UPDATE task_runs SET outcome='gave_up', status='failed', "
+            "ended_at=? WHERE id=?",
+            (5_000_000, run_id),
+        )
+        conn.execute(
+            "UPDATE tasks SET status='review', current_run_id=NULL, "
+            "claim_lock=NULL, claim_expires=NULL, worker_pid=NULL, "
+            "last_failure_error=? WHERE id=?",
+            ("401 authentication failed", tid),
+        )
+        conn.commit()
+
+        assert kbd.check_respawn_guard(conn, tid, lane="review") is None
+        assert kbd.check_respawn_guard(conn, tid) == "blocker_auth"
+
+
 def test_infrastructure_spawn_refusal_never_charges_the_card(
     kanban_home, monkeypatch, all_assignees_spawnable,
 ):

@@ -1565,14 +1565,17 @@ def check_respawn_guard(
     checked BEFORE ``blocker_auth`` because the requeue stamps a quota-flavored
     ``last_failure_error`` that would otherwise park the task forever — that
     path never increments ``consecutive_failures``), ``"blocker_auth"``
-    (quota/auth pattern; the breaker still trips eventually), then for the
-    ready lane only ``"recent_success"`` (completed run within the window, unless
-    a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
-    (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
-    handoff event followed the comment: the named profile must work on that
-    PR). The review lane skips the last two: they are the *inputs* to a review
-    handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
-    passes own those.
+    (quota/auth pattern in the stamped error, unless the latest run superseded
+    the stamp by completing or handing off to review; the breaker still trips
+    eventually), then for the ready lane only ``"recent_success"`` (completed
+    run within the window, unless a re-queue event arrived after it — a
+    deliberate re-run) and ``"active_pr"`` (PR URL in a recent comment;
+    re-spawning risks a duplicate PR — unless a handoff event followed the
+    comment: the named profile must work on that PR). The review lane returns
+    right after the cooldowns: it is handoff-driven, so neither a text-matched
+    failure stamp nor the last two reasons (the *inputs* to a review handoff)
+    may veto a requested review. Stale / dead claim locks are NOT a guard
+    reason — the reclaim passes own those.
     """
     row = conn.execute(
         "SELECT last_failure_error FROM tasks WHERE id = ?",
@@ -1613,19 +1616,30 @@ def check_respawn_guard(
         # (spaced by the cooldown) until quota returns or a real run supersedes it.
         return None
 
+    # Review-lane spawns stop here: the review lane is handoff-driven, so a
+    # text-matched failure stamp from the implementation run must not veto a
+    # requested review (#154423), and a recent completed run / fresh PR URL
+    # are the canonical *inputs* to a review handoff, not duplicate-work
+    # signals. The time-boxed cooldowns above still apply to this lane.
+    if lane == "review":
+        return None
+
     # 2. Quota / auth blocker: retrying immediately will not help.  A plain
     # crash is different: its persisted error includes the worker's last
     # captured output, which is context rather than a diagnosis and may contain
-    # benign commands such as ``claude auth status`` (#117097).
+    # benign commands such as ``claude auth status`` (#117097).  A latest run
+    # that completed or handed off to review likewise supersedes the stamp:
+    # those paths never rewrite ``last_failure_error``, so matching it would
+    # re-trap the card on every tick behind text a newer run already proved
+    # stale (#154423, #119070).
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
-    if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
+    if (
+        err
+        and latest_outcome not in ("crashed", "completed", "review_requested")
+        and _RESPAWN_BLOCKER_RE.search(err)
+    ):
         return "blocker_auth"
-
-    # Review-lane spawns stop here: a recent completed run and a fresh PR URL
-    # are the canonical *inputs* to a review handoff, not duplicate-work signals.
-    if lane == "review":
-        return None
 
     # 3. Completed run within guard window. Exception: an explicit re-queue
     #    AFTER that success (done→ready drag, re-promotion, unblock, reclaim) is

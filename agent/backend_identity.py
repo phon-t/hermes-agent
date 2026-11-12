@@ -74,6 +74,51 @@ def _both_first_class(a: BackendIdentity, b: BackendIdentity) -> bool:
         return False
 
 
+def _named_provider_credential(provider: str) -> str:
+    """Credential-source fingerprint for a named ``providers:`` entry, or "".
+
+    Mirrors the identity convention in hermes_cli.model_switch: ``key:<api_key>``,
+    ``env:<key_env>``, ``cmd:<key_cmd>``; a ``${ENV}`` api_key counts as its env
+    var. "" means "no such named entry, or the entry declares no credential
+    source" — unprovable either way, so it is evidence of nothing. The value is
+    only ever compared for equality, never logged or returned to callers.
+    """
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.config_providers import find_provider_entry
+
+        _, entry = find_provider_entry(load_config().get("providers"), provider)
+    except Exception:
+        return ""
+    if not entry:
+        return ""
+    api_key = str(entry.get("api_key") or "").strip()
+    if api_key.startswith("${") and api_key.endswith("}"):
+        return f"env:{api_key[2:-1].strip()}"
+    if api_key:
+        return f"key:{api_key}"
+    key_env = str(entry.get("key_env") or entry.get("api_key_env") or "").strip()
+    if key_env:
+        return f"env:{key_env}"
+    key_cmd = str(entry.get("key_cmd") or "").strip()
+    if key_cmd:
+        return f"cmd:{key_cmd}"
+    return ""
+
+
+def _distinct_named_credentials(a: BackendIdentity, b: BackendIdentity) -> bool:
+    """True when both labels are named ``providers:`` entries whose declared
+    credential sources are both set and differ (#154428).
+
+    Rate limits are per credential, not per URL + model: a 429 on one account
+    says nothing about another account on the same host. Shim aliases that
+    share one credential source keep the #22548 same-deployment behaviour.
+    """
+    cred_a = _named_provider_credential(a.provider)
+    cred_b = _named_provider_credential(b.provider)
+    return bool(cred_a and cred_b and cred_a != cred_b)
+
+
 def same_credential_surface(a: BackendIdentity, b: BackendIdentity) -> bool:
     """Do two identities share the credential a 401/402 just invalidated?
 
@@ -107,11 +152,13 @@ def same_deployment(a: BackendIdentity, b: BackendIdentity) -> bool:
         return bool(
             a.base_url
             # Same-host different-label shims: same URL + same model IS the same deployment even when the
-            # alias labels differ (#22548) — unless both labels are first-class registry providers (#70893).
+            # alias labels differ (#22548) — unless both labels are first-class registry providers (#70893)
+            # or named providers: entries with distinct credential sources (#154428).
             and a.base_url == b.base_url
             and a.model
             and a.model == b.model
             and not _both_first_class(a, b)
+            and not _distinct_named_credentials(a, b)
         )
     if not (a.model and b.model and a.model == b.model):
         return False

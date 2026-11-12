@@ -55,6 +55,63 @@ class TestSameDeployment:
             assert not same_deployment(a, b)
             assert not should_skip_candidate(a, b, FailureScope.MODEL)
 
+    def test_incident_154428_distinct_named_credentials_are_not_same(self):
+        """Two named providers: entries on one host with different key_envs:
+        a 429 on account-a says nothing about account-b's rate limit, so the
+        fallback candidate must not be skipped."""
+        config = {
+            "providers": {
+                "account-a": {
+                    "api": "https://api.anthropic.com",
+                    "key_env": "ACCOUNT_A_KEY",
+                },
+                "account-b": {
+                    "api": "https://api.anthropic.com",
+                    "key_env": "ACCOUNT_B_KEY",
+                },
+            }
+        }
+        with patch("hermes_cli.config.load_config", return_value=config):
+            failed = _id("account-a", "claude-opus-5-5", "https://api.anthropic.com")
+            candidate = _id("account-b", "claude-opus-5-5", "https://api.anthropic.com")
+            assert not same_deployment(candidate, failed)
+            assert not should_skip_candidate(candidate, failed, FailureScope.MODEL)
+
+    def test_incident_154428_shared_credential_aliases_stay_same(self):
+        """Named entries that share one credential source keep the #22548
+        shim behaviour: same URL + model + credential IS one deployment."""
+        config = {
+            "providers": {
+                "alias-a": {
+                    "api": "https://api.anthropic.com",
+                    "key_cmd": "cat ~/.key",
+                },
+                "alias-b": {
+                    "api": "https://api.anthropic.com",
+                    "key_cmd": "cat ~/.key",
+                },
+            }
+        }
+        with patch("hermes_cli.config.load_config", return_value=config):
+            a = _id("alias-a", "claude-opus-5-5", "https://api.anthropic.com")
+            b = _id("alias-b", "claude-opus-5-5", "https://api.anthropic.com")
+            assert same_deployment(a, b)
+
+    def test_incident_154428_undeclared_credential_stays_same(self):
+        """Named entries with no credential source declared prove nothing:
+        the previous same-deployment answer stands (no manufactured skip
+        change on an unprovable axis)."""
+        config = {
+            "providers": {
+                "plain-a": {"api": "https://api.anthropic.com"},
+                "plain-b": {"api": "https://api.anthropic.com"},
+            }
+        }
+        with patch("hermes_cli.config.load_config", return_value=config):
+            a = _id("plain-a", "claude-opus-5-5", "https://api.anthropic.com")
+            b = _id("plain-b", "claude-opus-5-5", "https://api.anthropic.com")
+            assert same_deployment(a, b)
+
 
 class TestSameCredentialSurface:
     def test_same_provider_label_shares_credential(self):

@@ -92,6 +92,61 @@ class TestCodeExecutionDelegation:
 
 
 # ---------------------------------------------------------------------------
+# End-to-end: escalation SIGKILLs a SIGTERM-ignoring descendant (#154418)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.live_system_guard_bypass
+@pytest.mark.platforms("posix")  # POSIX signal semantics
+def test_escalate_sigkills_sigterm_ignoring_child_of_promptly_dying_parent(tmp_path):
+    """Escalation used to watch only the root: when the root died promptly on
+    SIGTERM, no SIGKILL pass ever ran, so a descendant that ignored SIGTERM
+    outlived it — reparented to PID 1, where no fresh tree sweep can find it
+    (the interrupted-``execute_code`` leak, #154418)."""
+    pytest.importorskip("psutil")
+    import psutil
+
+    from tools import code_execution_tool
+
+    ready = tmp_path / "child_ready"
+    pid_file = tmp_path / "child.pid"
+    child_py = tmp_path / "child.py"
+    child_py.write_text(
+        "import pathlib, signal, time\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"pathlib.Path({str(ready)!r}).write_text('x')\n"
+        "time.sleep(120)\n"
+    )
+    parent_py = tmp_path / "parent.py"
+    parent_py.write_text(
+        "import pathlib, subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, {str(child_py)!r}])\n"
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(child.pid))\n"
+        "time.sleep(120)\n"
+    )
+    proc = subprocess.Popen([sys.executable, str(parent_py)])
+    child_pid = None
+    try:
+        deadline = time.monotonic() + 15
+        while not (ready.exists() and pid_file.exists()) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert ready.exists() and pid_file.exists(), "child never armed — test harness broken"
+        child_pid = int(pid_file.read_text().strip())
+
+        code_execution_tool._kill_process_group(proc, escalate=True)
+
+        _gone, alive = psutil.wait_procs([psutil.Process(child_pid)], timeout=10)
+        assert not alive, "SIGTERM-ignoring child survived escalation"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        if child_pid is not None:
+            try:
+                psutil.Process(child_pid).kill()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # End-to-end: setsid grandchild dies through the compat wrapper
 # ---------------------------------------------------------------------------
 

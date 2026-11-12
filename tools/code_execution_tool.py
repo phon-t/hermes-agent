@@ -811,6 +811,61 @@ def execute_code(
     ))
 
 
+def _snapshot_process_tree(pid: int) -> list[tuple[int, float]]:
+    """``(pid, create_time)`` for *pid* and every descendant, or ``[]`` when the
+    tree cannot be enumerated (psutil unavailable, root already gone). The
+    create time is the identity check that keeps a recycled pid safe."""
+    try:
+        import psutil
+
+        root = psutil.Process(pid)
+        members = [root, *root.children(recursive=True)]
+        return [(member.pid, member.create_time()) for member in members]
+    except Exception:
+        return []
+
+
+def _kill_tree_survivors(tree: list[tuple[int, float]], grace: float = 1.0) -> None:
+    """SIGKILL snapshotted processes still alive after a short grace.
+
+    A descendant that ignored the tree's SIGTERM outlives a promptly-dying
+    root and reparents to PID 1, where no fresh tree sweep can find it
+    (#154418) — the pre-signal snapshot is the only handle left. Members are
+    identity-checked by create time so a recycled pid is never signalled.
+    Best-effort; never raises.
+    """
+    if not tree:
+        return
+    try:
+        import psutil
+    except Exception:
+        return
+    deadline = time.monotonic() + grace
+    pending = list(tree)
+    while pending:
+        survivors = []
+        for pid, created in pending:
+            try:
+                member = psutil.Process(pid)
+                if (
+                    member.create_time() == created
+                    and member.status() != psutil.STATUS_ZOMBIE
+                ):
+                    survivors.append(member)
+            except Exception:
+                continue
+        if not survivors:
+            return
+        if time.monotonic() >= deadline:
+            for member in survivors:
+                try:
+                    member.kill()
+                except Exception:
+                    continue
+            return
+        time.sleep(0.05)
+
+
 def _kill_process_group(proc, escalate: bool = False):
     """Kill the child and its whole process tree via agent.deadline.kill_process_tree: SIGTERM
     (killpg + psutil descendant sweep; ``taskkill /T /F`` on Windows, where sig is ignored); with
@@ -826,12 +881,17 @@ def _kill_process_group(proc, escalate: bool = False):
                 proc.kill()
             except Exception as e2:
                 logger.debug("Could not kill process: %s", e2, exc_info=True)
+    # Snapshot before signalling when escalating: once the root dies, its
+    # children reparent to PID 1 and a later sweep cannot find them (#154418).
+    tree = _snapshot_process_tree(proc.pid) if escalate else []
     _tree_signal(getattr(_signal, "SIGTERM", None))
     if escalate:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _tree_signal(getattr(_signal, "SIGKILL", None))
+            return
+        _kill_tree_survivors(tree)
 
 
 def _load_config() -> dict:

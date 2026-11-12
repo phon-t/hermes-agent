@@ -314,6 +314,13 @@ KANBAN_RATE_LIMIT_EXIT_CODE = 75
 # the FIRST occurrence instead of spending ``failure_limit`` identical spawns. 78 == BSD EX_CONFIG.
 KANBAN_TERMINAL_PROVIDER_EXIT_CODE = 78
 
+# Worker exit "owner admission unknown": the documented admission race (the owner wrote its
+# ``owner_admitted`` marker after the submitting worker's liveness watcher had already ended
+# the attempt) left the execution retained by the owner, so nothing about the card failed —
+# the dispatcher books it like the infrastructure spawn refusal (#114720): a ``spawn_failed``
+# run that never counts against ``consecutive_failures`` (#154265). 69 == BSD EX_UNAVAILABLE.
+KANBAN_ADMISSION_UNKNOWN_EXIT_CODE = 69
+
 
 def _resolve_crash_grace_seconds() -> int:
     """``HERMES_KANBAN_CRASH_GRACE_SECONDS`` (0 = immediate, for tests) else default."""

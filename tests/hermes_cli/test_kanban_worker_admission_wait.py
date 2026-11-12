@@ -90,3 +90,16 @@ async def test_an_owner_that_stalls_after_admitting_fails_the_wait_within_the_lo
             # The outer 5 s guard only stops an unbounded wait from hanging the test.
             await real_wait_for(kanban_worker_client._await_receipt(client, params, str(tmp_path / 'kanban.db'), kanban_worker_client._Claim(answered=0.0)), 5)
     assert budgets == [budget] and [r['method'] for r in owner.sent] == ['kanban.run']
+
+
+def test_unknown_admission_exits_with_the_admission_unknown_code(tmp_path):
+    """An ``unknown`` admission is the documented owner race, not a failure:
+    the worker exits with ``KANBAN_ADMISSION_UNKNOWN_EXIT_CODE`` so the
+    dispatcher books an infrastructure spawn failure and never charges the
+    card's failure budget for it (#154265)."""
+    from hermes_cli import kanban_db
+
+    receipt = {'status': 'unknown', 'admission_id': 'a1'}
+    params = {'board': 'b', 'task_id': 't1', 'run_id': 1, 'claim_lock': 'lock'}
+    code = kanban_worker_client._exit_code(receipt, params, str(tmp_path / 'kanban.db'))
+    assert code == kanban_db.KANBAN_ADMISSION_UNKNOWN_EXIT_CODE

@@ -145,9 +145,15 @@ async def _await_receipt(client, params, board_db, claim):
 
 
 def _exit_code(receipt, params, board_db):
-    from hermes_cli.gateway_client import GatewayClientError
     if receipt['status'] == 'unknown':
-        raise GatewayClientError('Kanban execution unknown; retained by owner')
+        # The admission race documented in ``_await_receipt``: the owner
+        # retained the execution, so this is a host-side outcome, not a card
+        # failure. Exit with the dedicated code so the dispatcher books the
+        # run as an infrastructure spawn failure and never charges the card's
+        # failure budget for it (#154265).
+        from hermes_cli.kanban_db import KANBAN_ADMISSION_UNKNOWN_EXIT_CODE
+        print('Kanban execution unknown; retained by owner', file=sys.stderr)
+        return KANBAN_ADMISSION_UNKNOWN_EXIT_CODE
     from gateway.session_kanban import worker_result
     result = worker_result(board_db, params)
     # The attempt's reply ends the log, as a one-shot worker's did: crash diagnostics quote it.

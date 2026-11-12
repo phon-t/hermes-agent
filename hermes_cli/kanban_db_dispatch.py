@@ -251,6 +251,8 @@ def _exit_code_kind(code: int) -> tuple[str, int]:
         return ("rate_limited", code)
     if code == _kb.KANBAN_TERMINAL_PROVIDER_EXIT_CODE:
         return ("terminal_provider", code)
+    if code == _kb.KANBAN_ADMISSION_UNKNOWN_EXIT_CODE:
+        return ("admission_unknown", code)
     return ("nonzero_exit", code)
 
 
@@ -1049,9 +1051,18 @@ class _DeadWorker:
     terminal_provider: bool = False
     """``KANBAN_TERMINAL_PROVIDER_EXIT_CODE``: the provider rejected the worker's
     credential/model — trips the breaker on this first occurrence."""
+    admission_unknown: bool = False
+    """``KANBAN_ADMISSION_UNKNOWN_EXIT_CODE``: the owner-admission race left the
+    execution retained by the owner — booked as an infrastructure spawn failure,
+    never counted against the card (#154265)."""
 
     @property
     def run_outcome(self) -> str:
+        if self.admission_unknown:
+            # Booked like the host spawn refusal (#114720): the execution never
+            # ran, so the respawn guard spaces the retry on the infrastructure
+            # cooldown and the breaker never trips on it.
+            return "spawn_failed"
         # A rate-limited requeue is recorded as ``rate_limited`` so board history
         # doesn't show a phantom crash for a quota wall.
         return "rate_limited" if self.rate_limited else "crashed"
@@ -1133,6 +1144,23 @@ def _classify_dead_worker_exit(
             "crashed",
             {"pid": pid, "claimer": claimer, "exit_kind": kind, "exit_code": code, "terminal_provider": True},
             terminal_provider=True,
+        )
+    if kind == "admission_unknown":
+        # The owner admitted the claim after the worker's submitter-liveness
+        # watcher had already ended the attempt, and retained the execution
+        # (#154265): a documented host-side race, NOT a task failure. Release
+        # to the source phase and do NOT count a failure, exactly like the
+        # infrastructure spawn refusal (#114720) — the run is booked
+        # ``spawn_failed`` with ``infrastructure`` metadata, so the respawn
+        # guard spaces the retry on the infrastructure cooldown.
+        return _DeadWorker(
+            kind, code,
+            f"pid {pid} exited on an unknown owner admission (exit {code}): the owner retained "
+            "the execution after an admission race — requeued without counting a failure",
+            "spawn_failed",
+            {"pid": pid, "claimer": claimer, "exit_kind": kind, "exit_code": code,
+             "infrastructure": True, "admission_unknown": True},
+            admission_unknown=True,
         )
     if kind == "nonzero_exit":
         error_text = f"pid {pid} exited with code {code}"
@@ -1221,19 +1249,20 @@ def _reclaim_dead_workers(conn: sqlite3.Connection, board: Optional[str] = None)
                 "outcome": dead.run_outcome,
                 "retry_status": retry_status,
             })
-            if dead.rate_limited or dead.protocol_violation:
+            if dead.rate_limited or dead.protocol_violation or dead.admission_unknown:
                 # Stamp last_failure_error WITHOUT touching ``consecutive_failures``:
                 # a rate-limited requeue must show ``check_respawn_guard`` a quota
                 # blocker; a below-budget protocol violation never reaches
                 # ``_record_task_failure`` (which stamps this column), yet the
-                # board UI and retry worker need the corrective message.
+                # board UI and retry worker need the corrective message. An
+                # admission-unknown requeue (#154265) never reaches it either.
                 conn.execute(
                     "UPDATE tasks SET last_failure_error = ? WHERE id = ?",
                     (dead.error_text[:500], row["id"]),
                 )
             if dead.rate_limited:
                 sweep.rate_limited.append(row["id"])
-            else:
+            elif not dead.admission_unknown:
                 sweep.crashed.append(row["id"])
                 sweep.crash_details.append((row["id"], pid, row["claim_lock"], dead))
     return sweep

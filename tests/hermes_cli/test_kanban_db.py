@@ -428,6 +428,45 @@ def test_terminal_provider_exit_blocks_after_one_attempt_in_either_lane(kanban_h
         assert kb.get_task(conn, tid).status == "blocked"
 
 
+def test_admission_unknown_exit_requeues_without_counting_a_failure(kanban_home, monkeypatch):
+    """A worker exit with ``KANBAN_ADMISSION_UNKNOWN_EXIT_CODE`` is the
+    owner-admission race (#154265): the owner retained the execution after
+    admitting late, so nothing about the card failed. The run books as an
+    infrastructure ``spawn_failed``, the card returns to ready with
+    ``consecutive_failures`` untouched, and the respawn guard spaces the
+    retry on the infrastructure cooldown instead of the breaker."""
+    import hermes_cli.kanban_db as _kb
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: False)
+    monkeypatch.setenv("HERMES_KANBAN_CRASH_GRACE_SECONDS", "0")
+    monkeypatch.setenv("HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS", "300")
+
+    with kbc.connect() as conn:
+        host = _kb._claimer_id().split(":", 1)[0]
+        tid = kb.create_task(conn, title="admission race", assignee="a", max_retries=5)
+        kb.claim_task(conn, tid, claimer=f"{host}:w0")
+        pid = 71001
+        conn.execute("UPDATE tasks SET worker_pid=? WHERE id=?", (pid, tid))
+        conn.commit()
+        _kbd._record_worker_exit(pid, _exited_status(_kb.KANBAN_ADMISSION_UNKNOWN_EXIT_CODE))
+
+        crashed = kbd.detect_crashed_workers(conn)
+        assert tid not in crashed
+
+        task = kb.get_task(conn, tid)
+        assert task.status == "ready"
+        assert task.consecutive_failures == 0
+        assert "unknown owner admission" in (task.last_failure_error or "")
+        run = conn.execute(
+            "SELECT outcome, metadata FROM task_runs WHERE task_id=? "
+            "ORDER BY id DESC LIMIT 1",
+            (tid,),
+        ).fetchone()
+        assert run["outcome"] == "spawn_failed"
+        assert _kb._json_dict(run["metadata"]).get("infrastructure") is True
+        # Spaced by the infrastructure cooldown, never charged to the breaker.
+        assert kbd.check_respawn_guard(conn, tid) == "infrastructure_cooldown"
 
 
 def test_respawn_guard_defers_rate_limited_within_cooldown(
